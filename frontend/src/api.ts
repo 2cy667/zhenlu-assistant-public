@@ -39,13 +39,17 @@ async function parseError(response: Response): Promise<ApiRequestError> {
   return new ApiRequestError(message, response.status, body?.code);
 }
 
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+export async function request<T>(
+  path: string,
+  init: RequestInit = {},
+): Promise<T> {
   assertAuthenticated();
   let response: Response;
   try {
     response = await fetch(`${API_BASE}${path}`, {
       ...init,
       credentials: "same-origin",
+      cache: "no-store",
       headers: { ...csrfHeaders(), ...init.headers },
     });
   } catch (error) {

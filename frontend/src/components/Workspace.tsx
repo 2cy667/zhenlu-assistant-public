@@ -1,3 +1,6 @@
+import { RealtimeStatus } from "./RealtimeStatus";
+import { RealtimeAudio } from "./RealtimeAudio";
+import { realtimeReady } from "../realtime";
 import { RecordExport } from "./RecordExport";
 import type { TemplateSettings } from "../templates";
 import { useEffect, useRef, useState } from "react";
@@ -38,6 +41,7 @@ export function Workspace({
   onWorkspaceUpdated,
   onDirtyChange,
 }: WorkspaceProps) {
+  const [realtimeFresh, setRealtimeFresh] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
   const [mobilePane, setMobilePane] = useState("draft");
   const actionRunning = useRef(false);
@@ -73,6 +77,14 @@ export function Workspace({
     successMessage: string | ((next: SessionDetail) => string),
   ): Promise<boolean> {
     if (actionRunning.current) return false;
+    if (
+      workspace.realtime &&
+      action !== "save" &&
+      (!realtimeFresh || !realtimeReady(workspace))
+    ) {
+      notify("error", "请等待实时连接恢复、全部音频处理完成及最终草稿就绪。");
+      return false;
+    }
     if (deviceDisconnected && action !== "save") {
       notify("error", "设备已断开，请恢复连接后继续。");
       return false;
@@ -219,13 +231,22 @@ export function Workspace({
         音频和问诊文字将发送至已配置的模型服务，病历草稿须经医生核对确认。
       </p>
 
-      <StatusStepper
-        status={workspace.status}
-        hasAudio={workspace.audio !== null}
-        hasTranscript={workspace.transcript !== null}
-        hasDraft={workspace.draft !== null}
-        busy={busy}
-      />
+      {workspace.realtime ? (
+        <RealtimeStatus
+          workspace={workspace}
+          disconnected={deviceDisconnected}
+          onUpdate={onWorkspaceUpdated}
+          onFreshness={setRealtimeFresh}
+        />
+      ) : (
+        <StatusStepper
+          status={workspace.status}
+          hasAudio={workspace.audio !== null}
+          hasTranscript={workspace.transcript !== null}
+          hasDraft={workspace.draft !== null}
+          busy={busy}
+        />
+      )}
 
       {workspace.status === "failed" && workspace.error_message ? (
         <div className="alert alert-error" role="alert">
@@ -271,7 +292,9 @@ export function Workspace({
       </div>
       <div className="review-grid" data-pane={mobilePane}>
         <div className="review-original">
-          {!workspace.transcript || workspace.audio ? (
+          {workspace.realtime ? (
+            <RealtimeAudio workspace={workspace} />
+          ) : !workspace.transcript || workspace.audio ? (
             <AudioPanel
               workspace={workspace}
               busy={busy}
@@ -293,7 +316,11 @@ export function Workspace({
           workspace={workspace}
           busy={busy}
           selectedFieldKey={selectedFieldKey}
-          deviceDisconnected={deviceDisconnected}
+          deviceDisconnected={
+            deviceDisconnected ||
+            (!!workspace.realtime &&
+              (!realtimeFresh || !realtimeReady(workspace)))
+          }
           onSelectField={handleSelectSource}
           onGenerate={handleGenerate}
           onSave={handleSave}

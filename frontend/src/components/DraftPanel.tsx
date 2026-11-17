@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { sourcePlayable } from "../realtime";
+import { useEffect, useRef, useState } from "react";
 import type { BusyAction, Draft, SessionDetail } from "../types";
 import { formatDateTime } from "../utils";
 import { Modal } from "./Modal";
@@ -107,15 +108,32 @@ function DraftEditor({
     Record<string, boolean>
   >({});
 
+  const previousDraft = useRef(draft);
+  const acceptedRef = useRef(acceptedSuggestions);
+  acceptedRef.current = acceptedSuggestions;
   useEffect(() => {
-    setValues(
-      Object.fromEntries(draft.fields.map((field) => [field.key, field.value])),
+    const previous = previousDraft.current;
+    const accepted = acceptedRef.current;
+    setValues((current) =>
+      Object.fromEntries(
+        draft.fields.map((field) => {
+          const old = previous.fields.find((f) => f.key === field.key);
+          const edited =
+            previous.id === draft.id &&
+            old &&
+            ((current[field.key] ?? "").trim() !== old.value ||
+              field.key in accepted);
+          return [field.key, edited ? current[field.key] : field.value];
+        }),
+      ),
     );
+    // A newer model result never overwrites in-flight typing. Reviews must be repeated.
     setFormError(null);
     setAcceptedSuggestions({});
     setReviewed({});
     setIdentityChecked(false);
     setKeptSuggestions({});
+    previousDraft.current = draft;
   }, [draft.id, draft.revision]);
 
   const confirmed = draft.status === "confirmed";
@@ -161,7 +179,7 @@ function DraftEditor({
       return;
     }
     setFormError(null);
-    await onSave(
+    const saved = await onSave(
       dirtyFields.map((field) => ({
         field_key: field.key,
         value: (values[field.key] ?? "").trim(),
@@ -169,10 +187,27 @@ function DraftEditor({
       })),
       draft.revision,
     );
+    if (saved) {
+      setAcceptedSuggestions({});
+      setValues((current) =>
+        Object.fromEntries(
+          Object.entries(current).map(([key, value]) => [
+            key,
+            value === values[key] ? value.trim() : value,
+          ]),
+        ),
+      );
+    }
   }
 
   async function handleConfirm() {
-    if (!identityChecked || !draft.fields.every((f) => reviewed[f.key])) return;
+    if (
+      deviceDisconnected ||
+      dirty ||
+      !identityChecked ||
+      !draft.fields.every((f) => reviewed[f.key])
+    )
+      return;
     if (await onConfirm(draft.revision)) setDialog(null);
   }
 
@@ -339,16 +374,11 @@ function DraftEditor({
                   本次审核保留医生内容；确认将使用当前字段。
                 </p>
               )}
-              {workspace.audio &&
+              {(workspace.audio || workspace.realtime) &&
                 workspace.transcript?.has_reliable_timestamps && (
                   <div className="field-audio-sources">
                     {field.sources
-                      .filter(
-                        (source) =>
-                          source.start_ms != null &&
-                          source.end_ms != null &&
-                          source.end_ms > source.start_ms,
-                      )
+                      .filter((source) => sourcePlayable(workspace, source))
                       .map((source, index) => (
                         <button
                           type="button"

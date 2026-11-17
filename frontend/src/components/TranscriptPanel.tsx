@@ -36,16 +36,21 @@ export function TranscriptPanel({
   onDirtyChange,
 }: TranscriptPanelProps) {
   const transcript = workspace.transcript;
+  const [follow, setFollow] = useState(true);
   const [manualOpen, setManualOpen] = useState(false);
   const [manualText, setManualText] = useState("");
-  const lineCount = manualText.split(/\r?\n/).filter((line) => line.trim()).length;
+  const lineCount = manualText
+    .split(/\r?\n/)
+    .filter((line) => line.trim()).length;
   const listRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (focusToken === 0) return;
     const container = listRef.current;
     if (!container) return;
-    const target = container.querySelector<HTMLElement>('[data-highlighted="true"]');
+    const target = container.querySelector<HTMLElement>(
+      '[data-highlighted="true"]',
+    );
     if (!target) return;
     const containerRect = container.getBoundingClientRect();
     const targetRect = target.getBoundingClientRect();
@@ -54,6 +59,10 @@ export function TranscriptPanel({
     container.scrollTo({ top: Math.max(0, nextScrollTop), behavior: "smooth" });
   }, [focusToken]);
 
+  useEffect(() => {
+    const el = listRef.current;
+    if (workspace.realtime && follow && el) el.scrollTop = el.scrollHeight;
+  }, [workspace.realtime?.transcript_revision, follow]);
   const highlightSet = new Set(highlightIds);
 
   return (
@@ -61,7 +70,7 @@ export function TranscriptPanel({
       <header className="card-header">
         <div>
           <div className="heading-row">
-            <h2>问诊转写</h2>
+            <h2>{workspace.realtime ? "实时转写" : "问诊转写"}</h2>
             {transcript?.provider === "manual" ? (
               <span className="badge badge-outline">手动录入</span>
             ) : transcript?.is_mock ? (
@@ -71,68 +80,121 @@ export function TranscriptPanel({
             ) : null}
           </div>
         </div>
+        {workspace.realtime && (
+          <label className="follow-transcript">
+            <input
+              type="checkbox"
+              checked={follow}
+              onChange={(e) => setFollow(e.target.checked)}
+            />
+            跟随最新
+          </label>
+        )}
         {transcript ? (
           <span className="revision-chip">{transcript.segments.length} 句</span>
         ) : null}
       </header>
 
-      {!transcript ? (
+      {!transcript && workspace.realtime ? (
         <div className="empty-panel">
-              <EmptyWaveform />
-              <h3>{workspace.audio ? "音频已就绪" : "录入问诊内容"}</h3>
-              <p>{workspace.audio ? "开始语音识别，或手动录入问诊内容。" : "可直接输入问诊文字，也可以先上传音频。"}</p>
-              {manualOpen ? (
-                <div className="manual-transcript">
-                  <label htmlFor="manual-transcript">问诊内容（每行一段）</label>
-                  <textarea
-                    id="manual-transcript"
-                    className="field-textarea"
-                    rows={7}
-                    maxLength={20000}
-                    value={manualText}
-                    disabled={busy !== null}
-                    onChange={(event) => {
-                      setManualText(event.target.value);
-                      onDirtyChange(Boolean(event.target.value.trim()));
-                    }}
-                    placeholder="请输入问诊内容，每行一段。"
-                  />
-                  <p>手动内容不会自动关联音频时间；保存后不可编辑。</p>
-                  {lineCount > 200 ? <p className="field-error" role="alert">最多输入 200 行。</p> : null}
-                  <div className="manual-actions">
-                    <button type="button" className="btn btn-secondary" disabled={busy !== null} onClick={() => {
-                      setManualOpen(false); setManualText(""); onDirtyChange(false);
-                    }}>取消</button>
-                    <button type="button" className="btn btn-primary" disabled={busy !== null || !manualText.trim() || lineCount > 200} onClick={async () => {
-                      if (await onManualSave(manualText)) onDirtyChange(false);
-                    }}>{busy === "transcribe" ? "保存中…" : "保存问诊内容"}</button>
-                  </div>
-                </div>
-              ) : <>
-              {workspace.audio ? <button
+          <EmptyWaveform />
+          <h3>等待实时转写</h3>
+          <p>采集端上传片段，识别完成的对话会在这里逐段显示。</p>
+        </div>
+      ) : !transcript ? (
+        <div className="empty-panel">
+          <EmptyWaveform />
+          <h3>{workspace.audio ? "音频已就绪" : "录入问诊内容"}</h3>
+          <p>
+            {workspace.audio
+              ? "开始语音识别，或手动录入问诊内容。"
+              : "可直接输入问诊文字，也可以先上传音频。"}
+          </p>
+          {manualOpen ? (
+            <div className="manual-transcript">
+              <label htmlFor="manual-transcript">问诊内容（每行一段）</label>
+              <textarea
+                id="manual-transcript"
+                className="field-textarea"
+                rows={7}
+                maxLength={20000}
+                value={manualText}
+                disabled={busy !== null}
+                onChange={(event) => {
+                  setManualText(event.target.value);
+                  onDirtyChange(Boolean(event.target.value.trim()));
+                }}
+                placeholder="请输入问诊内容，每行一段。"
+              />
+              <p>手动内容不会自动关联音频时间；保存后不可编辑。</p>
+              {lineCount > 200 ? (
+                <p className="field-error" role="alert">
+                  最多输入 200 行。
+                </p>
+              ) : null}
+              <div className="manual-actions">
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  disabled={busy !== null}
+                  onClick={() => {
+                    setManualOpen(false);
+                    setManualText("");
+                    onDirtyChange(false);
+                  }}
+                >
+                  取消
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  disabled={
+                    busy !== null || !manualText.trim() || lineCount > 200
+                  }
+                  onClick={async () => {
+                    if (await onManualSave(manualText)) onDirtyChange(false);
+                  }}
+                >
+                  {busy === "transcribe" ? "保存中…" : "保存问诊内容"}
+                </button>
+              </div>
+            </div>
+          ) : (
+            <>
+              {workspace.audio ? (
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  onClick={onTranscribe}
+                  disabled={busy !== null}
+                >
+                  {busy === "transcribe" ? (
+                    <>
+                      <span className="spinner" aria-hidden="true" />
+                      正在转写…
+                    </>
+                  ) : (
+                    "开始转写"
+                  )}
+                </button>
+              ) : null}
+              <button
                 type="button"
-                className="btn btn-primary"
-                onClick={onTranscribe}
+                className="btn btn-secondary"
+                onClick={() => setManualOpen(true)}
                 disabled={busy !== null}
               >
-                {busy === "transcribe" ? (
-                  <>
-                    <span className="spinner" aria-hidden="true" />
-                    正在转写…
-                  </>
-                ) : (
-                  "开始转写"
-                )}
-              </button> : null}
-              <button type="button" className="btn btn-secondary" onClick={() => setManualOpen(true)} disabled={busy !== null}>
                 手动录入问诊内容
               </button>
-              </>}
+            </>
+          )}
         </div>
       ) : (
         <>
           {transcript.provider === "manual" ? (
-            <p className="transcript-notice">手动录入，未经过语音识别；无音频时间定位。</p>
+            <p className="transcript-notice">
+              手动录入，未经过语音识别；无音频时间定位。
+            </p>
           ) : transcript.notice ? (
             <p className="transcript-notice">{transcript.notice}</p>
           ) : null}
@@ -155,7 +217,7 @@ export function TranscriptPanel({
                 >
                   <div className="segment-side">
                     <span className={`speaker-chip ${speakerClass}`}>
-                      {segment.speaker}
+                      {segment.speaker || "未区分说话人"}
                     </span>
                     {segment.start_ms != null && segment.end_ms != null ? (
                       <span className="segment-time">
@@ -164,12 +226,16 @@ export function TranscriptPanel({
                       </span>
                     ) : null}
                   </div>
-                  <p className="segment-text">{segment.text}</p>
+                  <p className="segment-text">
+                    {segment.text}
+                    {segment.is_final === false && (
+                      <span className="badge badge-outline">识别中</span>
+                    )}
+                  </p>
                 </article>
               );
             })}
           </div>
-
         </>
       )}
     </section>

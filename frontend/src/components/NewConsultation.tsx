@@ -1,11 +1,10 @@
+import { createRealtimeSession } from "../realtime";
 import { useEffect, useRef, useState } from "react";
 import {
   createSession,
   generateDraft,
   getSession,
   saveManualTranscript,
-  startTranscription,
-  uploadSessionAudio,
 } from "../api";
 import type { SessionDetail } from "../types";
 import { errorMessage } from "../utils";
@@ -25,16 +24,17 @@ export function NewConsultation({
   const [mode, setMode] = useState(initialMode),
     [patient, setPatient] = useState(""),
     [reference, setReference] = useState(""),
-    [text, setText] = useState(""),
-    [file, setFile] = useState<File | null>(null);
+    [text, setText] = useState("");
+  const idempotencyKey = useRef(crypto.randomUUID());
+  const [realtimeSubmitted, setRealtimeSubmitted] = useState(false);
   const [busy, setBusy] = useState(false),
     [progress, setProgress] = useState(""),
     [error, setError] = useState(""),
     [created, setCreated] = useState<SessionDetail | null>(null);
   const working = useRef(false);
   useEffect(() => {
-    onDirtyChange(!!(patient || reference || text || file));
-  }, [patient, reference, text, file, onDirtyChange]);
+    onDirtyChange(!!(patient || reference || text));
+  }, [patient, reference, text, onDirtyChange]);
   async function submit(event: React.FormEvent) {
     event.preventDefault();
     if (working.current || disconnected) return;
@@ -51,24 +51,23 @@ export function NewConsultation({
       setError("请输入问诊文字，最多 200 行、20,000 字符。");
       return;
     }
-    if (
-      mode === "audio" &&
-      (!file ||
-        !file.size ||
-        file.size > 50 * 1024 * 1024 ||
-        !/\.(wav|mp3|m4a|ogg|webm|flac)$/i.test(file.name))
-    ) {
-      setError(
-        "请选择有效音频文件，支持 WAV、MP3、M4A、OGG、WebM、FLAC，最大 50 MB。",
-      );
-      return;
-    }
     working.current = true;
     setBusy(true);
     onBusyChange(true);
     setError("");
     try {
       setProgress("正在创建问诊…");
+      if (mode === "audio") {
+        setRealtimeSubmitted(true);
+        const next = await createRealtimeSession(
+          patient.trim(),
+          reference.trim(),
+          idempotencyKey.current,
+        );
+        onDirtyChange(false);
+        onComplete(next);
+        return;
+      }
       let next = created
         ? await getSession(created.id)
         : await createSession({
@@ -77,18 +76,8 @@ export function NewConsultation({
           });
       setCreated(next);
       if (!next.transcript) {
-        if (mode === "audio") {
-          if (!next.audio) {
-            setProgress("正在上传录音…");
-            next = await uploadSessionAudio(next.id, file!);
-            setCreated(next);
-          }
-          setProgress("正在识别问诊录音，请保持页面打开…");
-          next = await startTranscription(next.id);
-        } else {
-          setProgress("正在保存问诊原文…");
-          next = await saveManualTranscript(next.id, text.trim());
-        }
+        setProgress("正在保存问诊原文…");
+        next = await saveManualTranscript(next.id, text.trim());
         setCreated(next);
       }
       if (!next.draft) {
@@ -99,7 +88,23 @@ export function NewConsultation({
       onDirtyChange(false);
       onComplete(next);
     } catch (e) {
-      setError(errorMessage(e));
+      if (
+        mode === "audio" &&
+        e instanceof Error &&
+        "status" in e &&
+        [400, 404, 422, 503].includes(Number(e.status))
+      ) {
+        setRealtimeSubmitted(false);
+        idempotencyKey.current = crypto.randomUUID();
+      }
+      setError(
+        mode === "audio" &&
+          e instanceof Error &&
+          "status" in e &&
+          e.status === 404
+          ? "实时音频服务尚未接通，请联系管理员。"
+          : errorMessage(e),
+      );
     } finally {
       setBusy(false);
       working.current = false;
@@ -116,15 +121,15 @@ export function NewConsultation({
               key={m}
               aria-pressed={mode === m}
               className={mode === m ? "active" : ""}
-              disabled={busy || !!created}
+              disabled={busy || !!created || realtimeSubmitted}
               onClick={() => setMode(m)}
             >
-              {m === "text" ? "文字输入" : "音频导入"}
+              {m === "text" ? "文字输入" : "实时音频"}
             </button>
           ))}
         </div>
         <form onSubmit={(e) => void submit(e)}>
-          <fieldset disabled={busy || !!created}>
+          <fieldset disabled={busy || !!created || realtimeSubmitted}>
             <div className="form-grid">
               <label className="form-label">
                 患者姓名或代号
@@ -161,19 +166,20 @@ export function NewConsultation({
                 </small>
               </label>
             ) : (
-              <label className="upload-entry">
-                选择问诊录音
-                <input
-                  type="file"
-                  accept=".wav,.mp3,.m4a,.ogg,.webm,.flac"
-                  onChange={(e) => setFile(e.target.files?.[0] || null)}
-                />
-                <small>
-                  {file
-                    ? file.name
-                    : "支持 WAV、MP3、M4A、OGG、WebM、FLAC · 最大 50 MB"}
-                </small>
-              </label>
+              <div className="realtime-intake">
+                <h3>让问诊文字随对话到达。</h3>
+                <p>
+                  采集设备分段上传音频，识别后的文字在原审核工作台持续显示，病历草稿同步整理。
+                </p>
+                <ol>
+                  <li>关联本次问诊与采集设备</li>
+                  <li>接收原文并逐项核对</li>
+                  <li>结束录音后确认病历</li>
+                </ol>
+                <p>
+                  无需选择录音文件。进入工作台后，根据采集设备状态开始问诊。
+                </p>
+              </div>
             )}
           </fieldset>
           <p className="service-notice">
@@ -201,7 +207,9 @@ export function NewConsultation({
                 ? "正在处理…"
                 : created
                   ? "继续处理此会话"
-                  : "生成病历并进入审核 →"}
+                  : mode === "audio"
+                    ? "进入实时审核工作台 →"
+                    : "生成病历并进入审核 →"}
             </button>
           </div>
           {created && (

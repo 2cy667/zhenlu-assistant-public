@@ -30,6 +30,9 @@ export interface AudioInfo {
 }
 
 export interface TranscriptSegment {
+  revision?: number;
+  is_final?: boolean;
+  source_ranges?: AudioSourceRange[];
   id: string;
   seq: number;
   speaker: string;
@@ -114,11 +117,45 @@ export interface SessionSummary {
 }
 
 export interface SessionDetail extends SessionSummary {
+  realtime?: RealtimeState | null;
   error_message: string | null;
   audio: AudioInfo | null;
   transcript: Transcript | null;
   draft: Draft | null;
   latest_record: ConfirmedRecord | null;
+}
+
+export interface AudioSourceRange {
+  chunk_id: string;
+  start_ms: number;
+  end_ms: number;
+}
+export interface AudioChunk {
+  id: string;
+  seq: number;
+  offset_ms: number;
+  duration_ms: number;
+  status: "receiving" | "transcribing" | "completed" | "failed";
+  audio_url: string | null;
+  error_message: string | null;
+  retryable: boolean;
+}
+export interface RealtimeState {
+  version: number;
+  capture:
+    | "idle"
+    | "starting"
+    | "recording"
+    | "stopping"
+    | "ended"
+    | "disconnected";
+  control_mode: "web" | "device";
+  end_received: boolean;
+  last_chunk_seq: number | null;
+  transcript_revision: number;
+  draft_transcript_revision: number | null;
+  final_draft_ready: boolean;
+  chunks: AudioChunk[];
 }
 
 export interface SessionListResponse {

@@ -1,3 +1,4 @@
+import { sourcePlayable } from "../realtime";
 import type { DraftField, SessionDetail, TranscriptSegment } from "../types";
 import { formatTimestamp } from "../utils";
 
@@ -13,7 +14,6 @@ export function SourcePanel({
   onSelectField,
 }: SourcePanelProps) {
   const transcript = workspace.transcript;
-  const audio = workspace.audio;
 
   function seekAndPlay(source: TranscriptSegment) {
     window.dispatchEvent(
@@ -107,7 +107,7 @@ export function SourcePanel({
                           {formatTimestamp(source.start_ms)}–
                           {formatTimestamp(source.end_ms)}
                         </span>
-                        {audio ? (
+                        {sourcePlayable(workspace, source) ? (
                           <button
                             type="button"
                             className="text-btn"

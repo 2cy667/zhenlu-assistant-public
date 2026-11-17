@@ -1,3 +1,4 @@
+import { newerSession } from "./realtime";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getSession, listSessions } from "./api";
 import { AuthBoundary, authenticationEnabled, type AuthUser } from "./auth";
@@ -230,7 +231,8 @@ function AppWorkspace({
   }
   function updated(next: SessionDetail) {
     if (!mounted.current) return;
-    if (selectedId.current === next.id) setWorkspace(next);
+    if (selectedId.current === next.id)
+      setWorkspace((current) => newerSession(current, next));
     void refresh();
   }
   function created(next: SessionDetail) {
@@ -429,10 +431,10 @@ function AppWorkspace({
                         <p>
                           {input === "text"
                             ? "粘贴已有问诊对话，按原文整理病历。"
-                            : "导入问诊录音，识别文字并核对原音。"}
+                            : "采集端分段上传，转写持续更新，随时核对来源。"}
                         </p>
                         <span>
-                          {input === "text" ? "输入问诊文字" : "导入问诊音频"} →
+                          {input === "text" ? "输入问诊文字" : "开始实时音频"} →
                         </span>
                       </button>
                     ))}

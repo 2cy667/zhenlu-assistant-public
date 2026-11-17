@@ -17,26 +17,25 @@ npm run build
 | 模块 | 行为 |
 | --- | --- |
 | `#home` | 文字 / 音频并列入口、后端实际待办和确认记录、继续会话 |
-| `#new` | 创建会话后依次保存文字或上传 / 识别音频，再生成草稿；显示逐步进度；失败保留已建立会话，重试继续 |
-| `#workbench` | 左原文与音频、中病历、右来源；小屏页签；编辑、建议比较、逐项核对、确认只读 |
+| `#new` | 文字模式创建会话、保存原文并生成草稿；音频模式原子创建实时会话并进入原工作台，不再选择整段文件 |
+| `#workbench` | 左原文与音频、中病历、右来源；实时会话在同页同步片段进度、转写与草稿；小屏页签；编辑、建议比较、逐项核对、确认只读 |
 | `#records` | 按状态筛选、按患者 / 编号 / 会话 ID 搜索、打开会话 |
 | `#templates` | 字段映射、标题、顺序、启用开关、空值和换行、身份信息、另存模板 |
 | `#settings` | 当前用户 / 单机运行状态、信息密度和模板入口 |
 
-音频回听只在 `has_reliable_timestamps=true` 且来源起止时间有效时开放；时间值为 null 时不虚构 00:00。字段可关联多个来源，播放到对应终点自动暂停，支持整段播放和速度选择。服务器需支持音频 Range 请求；FastAPI 文件响应应保留这一行为。
+历史整段音频回听只在 `has_reliable_timestamps=true` 且来源起止时间有效时开放；时间值为 null 时不虚构 00:00。实时会话还要求来源为最终文本且 `source_ranges` 对应片段可播放。跨段来源按顺序播放各文件内区间，到来源终点自动暂停，支持速度选择。服务器需提供同源、带鉴权且支持 Range 的音频地址。
 
 草稿修改提交 `expected_revision`。409 冲突会显示服务器错误并保留医生尚未提交的文字，不自动覆盖或重试旧版本。确认前要求逐项核对与患者核对；后端确认成功后只读，复制导出仅使用 `latest_record`。浏览器复制失败时展示可选中的文本，TXT 文件在前端生成。
 
 ## 复用的已有后端接口
 
-所有接口在 `src/api.ts`，不另设本地数据模拟层。
+已有业务接口在 `src/api.ts`，新增实时适配在 `src/realtime.ts`，不另设本地数据模拟层。
 
 | 操作 | 请求 |
 | --- | --- |
 | 会话列表 / 详情 | `GET /api/sessions`、`GET /api/sessions/{id}` |
 | 创建 | `POST /api/sessions`，`{patient_name, patient_ref}` |
-| 上传音频 | `POST /api/sessions/{id}/audio`，multipart `file` |
-| 音频识别 | `POST /api/sessions/{id}/transcript` |
+| 历史单文件音频接口 | `POST /api/sessions/{id}/audio`、`POST /api/sessions/{id}/transcript`，后端保留，新建音频入口不调用 |
 | 文字原文 | `POST /api/sessions/{id}/transcript/manual`，`{text}` |
 | 生成草稿 | `POST /api/sessions/{id}/draft` |
 | 保存医生修改 | `PATCH /api/sessions/{id}/draft`，`{expected_revision, fields:[{field_key,value,accept_suggestion?}]}` |
@@ -44,7 +43,17 @@ npm run build
 | 确认 | `POST /api/sessions/{id}/confirm`，`{expected_revision}` |
 | 设备 | `GET /api/device/status`，两秒轮询；断连暂停新建、生成与确认，保留保存能力 |
 
-`src/types.ts` 保持后端既有类型。五个字段使用 `chief_complaint`、`present_illness`、`past_history`、`medication_history`、`allergy_history`；没有新增需后端猜测的字段 ID。
+`src/types.ts` 保留后端既有字段，增加可选 `realtime`、句子修订及片段来源。五个病历字段仍使用 `chief_complaint`、`present_illness`、`past_history`、`medication_history`、`allergy_history`。
+
+## 实时音频：前端已适配，新增后端接口待实现
+
+新增契约包括 `POST /api/sessions/realtime`、`GET /api/sessions/{id}/realtime` 及同路径下的 `POST start / stop / retry`。完整请求、响应、错误语义及采集端职责见 [实时接口说明](../docs/realtime-api.md)。当前后端没有这些路由，未接入时页面明确报错，不回退整段上传或模拟转写。
+
+- 网页每次快照请求完成后等待 2 秒再次请求，超时 10 秒；本实现使用 HTTP 轮询，没有实现 SSE / WebSocket。断线恢复读取完整快照，以 `realtime.version` 拒绝旧响应。
+- `control_mode` 决定网页按钮控制或设备本地控制。网页发出停止请求后等待设备确认；离开工作台不等于停止设备。
+- 新转写更新未编辑字段，保留医生当前未保存输入；后端仍须保护已保存的医生修改，仅提供建议。保存继续使用草稿 `expected_revision`。
+- 确认前要求已收到结束标记、片段连续且全部完成、转写最终定稿、草稿追上原文，并成功同步最新快照；后端必须原子重复校验这些条件。
+- `RealtimeStatus.tsx` 负责快照及控制，`RealtimeAudio.tsx` 负责跨片段来源回听；继续复用原审核、记录、模板及导出组件。
 
 ## 登录接口：预留契约，后端尚未实现
 
@@ -89,4 +98,4 @@ npm run build
 
 ## 验证
 
-`npm run build` 执行 TypeScript 严格检查与 Vite 打包。此次本机浏览器验证采用仓库接口形状的受控响应，覆盖文字 / 音频链路、生成失败续办、409 保留输入、模板导出、区间停止、确认只读以及服务端认证模式的 401 恢复；未调用付费 ASR / 大模型，不能代替真实供应商和认证服务联调。
+`npm run build` 执行 TypeScript 严格检查与 Vite 打包。本机浏览器验证采用接口契约的受控响应，覆盖文字生成、失败续办、409 保留输入、模板导出、确认只读、认证 401 恢复，以及实时片段排序去重、跨段播放、失败重试、断线恢复、收尾阻断和未保存输入保护。未调用付费 ASR / 大模型，不能代替真实设备、供应商及认证服务联调；验证脚本和素材不属于正式前端交付。
