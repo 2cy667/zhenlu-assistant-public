@@ -363,3 +363,28 @@ def test_fun_asr_failure_is_visible_and_retryable(client: TestClient) -> None:
     retried = client.post(f"/api/sessions/{session_id}/transcript")
     assert retried.status_code == 200, retried.text
     assert retried.json()["status"] == "transcribed"
+
+
+def test_incremental_callback_only_emits_final_sentences_once(tmp_path):
+    event = result_event("没有发热。", billed_seconds=2)
+    provider = provider_for(FakeConnection([
+        result_event("有发热", sentence_end=False), event, event, finished_event(),
+    ]))
+    saved = []
+    path = write_wav(tmp_path / "sample.wav")
+    result = provider.transcribe(path, "sample.wav", on_segment=lambda seq, segment: saved.append((seq, segment)))
+    assert len(saved) == 1 and saved[0][1].text == "没有发热。"
+    assert result.metadata["billed_duration_seconds"] == 2
+
+
+def test_incremental_persistence_failure_aborts_and_retains_billed_usage(tmp_path):
+    provider = provider_for(FakeConnection([result_event("咳嗽。"), finished_event()]))
+
+    def fail_save(seq, segment):
+        raise RuntimeError("private database detail")
+
+    with pytest.raises(AsrProviderError) as error:
+        provider.transcribe(write_wav(tmp_path / "sample.wav"), "sample.wav", on_segment=fail_save)
+    assert error.value.code == "fun_asr_persistence_failed"
+    assert error.value.metadata["billed_duration_seconds"] == 1
+    assert "private" not in str(error.value)

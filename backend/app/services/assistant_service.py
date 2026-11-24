@@ -24,7 +24,7 @@ def assistant_context(session: ConsultationSession) -> dict:
         {**segment_dict(s), "id": f"segment:{s.id}", "kind": "segment", "segment_id": s.id}
         for s in transcript.segments
     ]
-    version = {"transcript_id": transcript.id, "record_kind": "transcript", "draft_revision": None, "confirmed_version": None, "record_id": None}
+    version = {"transcript_id": transcript.id, "transcript_revision": transcript.revision, "transcript_state": transcript.state, "record_kind": "transcript", "draft_revision": None, "confirmed_version": None, "record_id": None}
     if session.confirmed_records:
         record = session.confirmed_records[-1]
         version.update(record_kind="confirmed", draft_revision=record.draft_revision, confirmed_version=record.version, record_id=record.id)

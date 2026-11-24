@@ -31,11 +31,21 @@ class Base(DeclarativeBase):
     pass
 
 
+class Patient(Base):
+    __tablename__ = "patients"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    patient_name: Mapped[str] = mapped_column(String(80), index=True)
+    patient_ref: Mapped[str | None] = mapped_column(String(120), unique=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
 class ConsultationSession(Base):
     __tablename__ = "consultation_sessions"
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
     patient_name: Mapped[str] = mapped_column(String(80))
+    patient_id: Mapped[str | None] = mapped_column(ForeignKey("patients.id"), index=True)
     patient_ref: Mapped[str | None] = mapped_column(String(120), nullable=True)
     status: Mapped[str] = mapped_column(
         String(32), default=SessionStatus.AWAITING_AUDIO, nullable=False, index=True
@@ -108,6 +118,8 @@ class Transcript(Base):
     is_mock: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     language: Mapped[str] = mapped_column(String(20), default="zh-CN")
     notice: Mapped[str] = mapped_column(Text, default="")
+    revision: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+    state: Mapped[str] = mapped_column(String(20), default="final", server_default="final")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
 
     session: Mapped[ConsultationSession] = relationship(back_populates="transcript")
@@ -221,6 +233,40 @@ class ConfirmedRecord(Base):
 Index("ix_sessions_updated_at", ConsultationSession.updated_at)
 
 
+class ConsultationItem(Base):
+    __tablename__ = "consultation_items"
+    __table_args__ = (UniqueConstraint("origin_session_id", "topic_key"),
+                      UniqueConstraint("origin_session_id", "request_id"))
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    origin_session_id: Mapped[str] = mapped_column(ForeignKey("consultation_sessions.id"), index=True)
+    topic_key: Mapped[str | None] = mapped_column(String(96))
+    request_id: Mapped[str | None] = mapped_column(String(100))
+    request_hash: Mapped[str | None] = mapped_column(String(64))
+    title: Mapped[str] = mapped_column(String(160))
+    origin: Mapped[str] = mapped_column(String(16))
+    status: Mapped[str] = mapped_column(String(16), default="open")
+    carry_forward: Mapped[bool] = mapped_column(Boolean, default=False)
+    result: Mapped[str] = mapped_column(Text, default="")
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class ItemAction(Base):
+    __tablename__ = "consultation_item_actions"
+    __table_args__ = (UniqueConstraint("item_id", "revision"),)
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    item_id: Mapped[str] = mapped_column(ForeignKey("consultation_items.id"), index=True)
+    session_id: Mapped[str] = mapped_column(ForeignKey("consultation_sessions.id"), index=True)
+    actor: Mapped[str] = mapped_column(String(80))
+    revision: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(16))
+    carry_forward: Mapped[bool] = mapped_column(Boolean)
+    result: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
 class ProcessingJob(Base):
     """Durable operation and lease. A non-null slot allows one model job per session."""
 
@@ -278,3 +324,47 @@ class StructuredDialogue(Base):
     turns: Mapped[list[dict]] = mapped_column(JSON)
     notice: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class TranscriptBatch(Base):
+    __tablename__ = "transcript_batches"
+    __table_args__ = (UniqueConstraint("transcript_id", "request_id", name="uq_transcript_batch"),)
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    transcript_id: Mapped[str] = mapped_column(ForeignKey("transcripts.id", ondelete="CASCADE"), index=True)
+    request_id: Mapped[str] = mapped_column(String(100))
+    payload_hash: Mapped[str] = mapped_column(String(64))
+    revision: Mapped[int] = mapped_column(Integer)
+
+
+class AdvisorState(Base):
+    """Separate queue/lease so long ASR tasks cannot block clinical advice."""
+    __tablename__ = "advisor_states"
+    session_id: Mapped[str] = mapped_column(ForeignKey("consultation_sessions.id", ondelete="CASCADE"), primary_key=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    target_revision: Mapped[int] = mapped_column(Integer, default=0)
+    pending_since: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    last_started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    active_run_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    latest_run_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    run_count: Mapped[int] = mapped_column(Integer, default=0)
+    error_code: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class AdvisorRun(Base):
+    __tablename__ = "advisor_runs"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    session_id: Mapped[str] = mapped_column(ForeignKey("consultation_sessions.id", ondelete="CASCADE"), index=True)
+    transcript_id: Mapped[str] = mapped_column(ForeignKey("transcripts.id", ondelete="CASCADE"))
+    transcript_revision: Mapped[int] = mapped_column(Integer)
+    transcript_state: Mapped[str] = mapped_column(String(20))
+    provider: Mapped[str] = mapped_column(String(160))
+    input_hash: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(20), default="running")
+    suggestions: Mapped[list[dict]] = mapped_column(JSON, default=list)
+    metrics: Mapped[dict] = mapped_column(JSON, default=dict)
+    error_code: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

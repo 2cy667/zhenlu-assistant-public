@@ -18,6 +18,7 @@ docs/团队分工与阶段任务.md
 docs/诊录助手初步产品简易方案.md
 docs/teacher-demo.md
 docs/*
+!docs/实时会诊助手模块方案.md
 
 # 本地数据（数据库与上传音频，不提交）
 backend/data/*

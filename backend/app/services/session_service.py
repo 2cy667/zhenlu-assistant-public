@@ -5,15 +5,24 @@ from sqlalchemy.orm import Session
 
 from app.constants import DraftStatus, SessionStatus
 from app.errors import ApiError
-from app.models import ConsultationSession
+from app.models import ConsultationSession, Patient
 from app.schemas import SessionCreate
 from app.services.job_state import recover_expired
 
 
 def create_session(db: Session, payload: SessionCreate) -> ConsultationSession:
+    patient = None
+    if payload.patient_id:
+        patient = db.get(Patient, payload.patient_id)
+        if patient is None:
+            raise ApiError(404, "patient_not_found", "患者档案不存在。")
+        if ((payload.patient_name and payload.patient_name != patient.patient_name)
+                or (payload.patient_ref and payload.patient_ref != patient.patient_ref)):
+            raise ApiError(409, "patient_identity_conflict", "提交的身份信息与已选患者不一致。")
     session = ConsultationSession(
-        patient_name=payload.patient_name,
-        patient_ref=payload.patient_ref,
+        patient_id=payload.patient_id,
+        patient_name=patient.patient_name if patient else payload.patient_name,
+        patient_ref=patient.patient_ref if patient else payload.patient_ref,
         status=SessionStatus.AWAITING_AUDIO,
     )
     db.add(session)

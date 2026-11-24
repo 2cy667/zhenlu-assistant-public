@@ -4,7 +4,7 @@ import logging
 import re
 
 from sqlalchemy import update
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import Settings
 from app.constants import (
@@ -35,6 +35,8 @@ from app.providers.qwen_draft import DraftProviderError, _parse_fields
 from app.schemas import DraftUpdate
 from app.serializers import segment_dict
 from app.services.audio_service import resolve_audio_path
+from app.services.advice_state import lock_session, queue_advice
+from app.services.live_transcript import store_asr_sentence
 from app.services.dialogue_service import transcript_document
 from app.services.export import build_record_text
 from app.services.job_state import ensure_no_active_job, finish_job
@@ -55,6 +57,8 @@ def _clean_times(
 
 def _mark_failed(db: Session, session: ConsultationSession, message: str) -> None:
     session.status = SessionStatus.FAILED
+    if session.transcript and session.transcript.state == "streaming":
+        session.transcript.state = "interrupted"
     session.error_message = message
     session.updated_at = utcnow()
     db.commit()
@@ -113,7 +117,12 @@ def transcribe_session(
     if session.audio_file is None:
         raise ApiError(409, "audio_required", "请先上传音频，再开始转写。")
     if session.transcript is not None:
-        raise ApiError(409, "transcript_exists", "该会话已完成转写，不能重复执行。")
+        if session.transcript.state != "interrupted":
+            raise ApiError(409, "transcript_exists", "该会话已有转写，不能重复执行。")
+        if session.transcript.provider != provider.name:
+            raise ApiError(409, "transcript_provider_conflict", "请使用原语音服务重试中断的转写，或新建会话。")
+        session.transcript.state = "streaming"
+        session.transcript.revision += 1
 
     audio_path = resolve_audio_path(settings, session.audio_file)
     session.status = SessionStatus.TRANSCRIBING
@@ -122,9 +131,21 @@ def transcribe_session(
     db.commit()
 
     try:
+        kwargs = {}
+        if getattr(provider, "supports_incremental", False):
+            factory = sessionmaker(bind=db.get_bind(), autoflush=False, expire_on_commit=False)
+
+            def persist_sentence(seq, segment):
+                try:
+                    store_asr_sentence(factory, session_id, job_id, provider, seq, segment)
+                except ApiError as exc:
+                    raise AsrProviderError(exc.code, exc.message) from None
+
+            kwargs["on_segment"] = persist_sentence
         result = provider.transcribe(
             audio_path=audio_path,
             original_filename=session.audio_file.original_filename,
+            **kwargs,
         )
     except AsrProviderError as exc:
         logger.warning("ASR provider failed for session %s: %s", session.id, exc.code)
@@ -140,7 +161,8 @@ def transcribe_session(
         ) from exc
 
     db.rollback()
-    session = get_session_or_404(db, session_id)
+    # A callback uses its own connection. rollback alone may be a no-op after commit.
+    session = lock_session(db, session_id)
     ensure_editable(session)
     clean_segments = [
         segment for segment in result.segments if segment.text.strip()
@@ -150,33 +172,45 @@ def transcribe_session(
             _mark_failed(db, session, "转写未返回任何有效文本，请更换音频后重试。")
         raise ApiError(502, "empty_transcript", "转写结果为空，请更换音频后重试。")
 
-    transcript = Transcript(
-        id=new_id(),
-        session_id=session.id,
-        audio_file_id=session.audio_file.id,
-        provider=result.provider,
-        is_mock=result.is_mock,
-        language=result.language or "zh-CN",
-        notice=result.notice,
-    )
-    for seq, segment in enumerate(clean_segments):
-        start_ms, end_ms = _clean_times(segment.start_ms, segment.end_ms)
-        transcript.segments.append(
-            TranscriptSegment(
-                id=new_id(),
-                seq=seq,
-                speaker=segment.speaker.strip() or "未知",
-                text=segment.text.strip(),
-                start_ms=start_ms,
-                end_ms=end_ms,
-            )
+    if session.transcript is not None:
+        transcript = session.transcript
+        saved = [(s.text, s.speaker, s.start_ms, s.end_ms) for s in transcript.segments]
+        expected = [(s.text.strip(), s.speaker.strip() or "未知", *_clean_times(s.start_ms, s.end_ms)) for s in clean_segments]
+        if saved != expected:
+            raise ApiError(502, "asr_final_mismatch", "最终转写与已保存句子不一致，原文保留，请核对录音。", metrics=result.metadata)
+        transcript.state = "final"
+        transcript.revision += 1
+        transcript.notice, transcript.language = result.notice, result.language or "zh-CN"
+    else:
+        transcript = Transcript(
+            id=new_id(),
+            session_id=session.id,
+            audio_file_id=session.audio_file.id,
+            provider=result.provider,
+            is_mock=result.is_mock,
+            language=result.language or "zh-CN",
+            notice=result.notice,
         )
+        for seq, segment in enumerate(clean_segments):
+            start_ms, end_ms = _clean_times(segment.start_ms, segment.end_ms)
+            transcript.segments.append(
+                TranscriptSegment(
+                    id=new_id(),
+                    seq=seq,
+                    speaker=segment.speaker.strip() or "未知",
+                    text=segment.text.strip(),
+                    start_ms=start_ms,
+                    end_ms=end_ms,
+                )
+            )
 
     finish_job(db, job_id, {"transcript_id": transcript.id}, result.metadata)
     session.transcript = transcript
     session.status = SessionStatus.TRANSCRIBED
     session.error_message = None
     session.updated_at = utcnow()
+    db.flush()
+    queue_advice(db, session.id, transcript.revision)
     db.commit()
     return get_session_or_404(db, session.id)
 
@@ -209,6 +243,8 @@ def create_manual_transcript(db: Session, session_id: str, text: str) -> Consult
     session.status = SessionStatus.TRANSCRIBED
     session.error_message = None
     session.updated_at = utcnow()
+    db.flush()
+    queue_advice(db, session.id, transcript.revision)
     db.commit()
     return get_session_or_404(db, session.id)
 
@@ -231,6 +267,8 @@ def generate_draft(
         )
 
     transcript = session.transcript
+    if transcript.state != "final":
+        raise ApiError(409, "transcript_not_final", "请先完成转录，再生成正式病历草稿。")
     document = transcript_document(session)
     session.status = SessionStatus.GENERATING_DRAFT
     session.error_message = None
@@ -361,6 +399,8 @@ def regenerate_draft(
         )
 
     transcript = session.transcript
+    if transcript.state != "final":
+        raise ApiError(409, "transcript_not_final", "请先完成转录，再生成正式病历草稿。")
     document = transcript_document(session)
     db.commit()
     try:

@@ -5,14 +5,30 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.errors import ApiError
-from app.schemas import ManualTranscriptInput, SessionDetailOut, TranscriptOut
+from app.schemas import ManualTranscriptInput, RevisionRequest, SessionDetailOut, TranscriptAppend, TranscriptOut
 from app.serializers import session_detail_dict, transcript_dict
 from app.services.session_service import get_session_or_404
 from app.services.workflow import create_manual_transcript
 from app.services.jobs import execute_inline
 from app.routers.assistant import IdempotencyKey
+from app.services.live_transcript import append_stream, complete_stream, open_stream
 
 router = APIRouter(prefix="/sessions", tags=["转写"])
+
+
+@router.post("/{session_id}/transcript/stream", response_model=TranscriptOut)
+def begin_live_transcript(session_id: str, db: Session = Depends(get_db)) -> dict:
+    return transcript_dict(open_stream(db, session_id))
+
+
+@router.post("/{session_id}/transcript/stream/segments", response_model=TranscriptOut)
+def append_live_transcript(session_id: str, payload: TranscriptAppend, db: Session = Depends(get_db)) -> dict:
+    return transcript_dict(append_stream(db, session_id, payload))
+
+
+@router.post("/{session_id}/transcript/stream/complete", response_model=TranscriptOut)
+def finish_live_transcript(session_id: str, payload: RevisionRequest, db: Session = Depends(get_db)) -> dict:
+    return transcript_dict(complete_stream(db, session_id, payload.expected_revision))
 
 
 @router.post("/{session_id}/transcript/manual", response_model=SessionDetailOut)

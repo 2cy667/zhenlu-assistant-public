@@ -50,6 +50,8 @@ def _restore_session(db: Session, session_id: str, message: str) -> None:
     if session is None or session.confirmed_version:
         return
     session.status = SessionStatus.DRAFT_READY if session.draft else SessionStatus.FAILED
+    if session.transcript and session.transcript.state == "streaming":
+        session.transcript.state = "interrupted"
     session.error_message = message
     session.updated_at = utcnow()
 
@@ -90,6 +92,10 @@ def recover_legacy_states(db: Session) -> None:
         ~ConsultationSession.id.in_(select(ProcessingJob.active_session_id).where(ProcessingJob.active_session_id.is_not(None))),
     )))
     for sid in ids:
+        session = db.get(ConsultationSession, sid)
+        if session.transcript and session.transcript.provider == "live-input" and session.transcript.state == "streaming":
+            # External producers can reconnect and replay batches after a server restart.
+            continue
         _restore_session(db, sid, "旧版未完成的处理已恢复为可重试状态，已有资料已保留。")
     db.commit()
 

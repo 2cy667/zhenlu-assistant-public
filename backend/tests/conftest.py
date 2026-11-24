@@ -25,6 +25,7 @@ def quiet_http_logs() -> None:
 
 @pytest.fixture(autouse=True)
 def test_providers(monkeypatch):
+    monkeypatch.setenv("ZHENLU_LIVE_ASSISTANT_ENABLED", "false")
     catalog = DemoCatalog(SAMPLE_DATA_DIR)
     monkeypatch.setattr("app.main.build_asr_provider", lambda settings: MockTranscriptionProvider(catalog))
     monkeypatch.setattr("app.main.build_draft_provider", lambda settings: MockDraftProvider(catalog))

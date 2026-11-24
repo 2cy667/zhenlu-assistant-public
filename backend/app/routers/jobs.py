@@ -5,7 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import ProcessingJob
+from app.models import AdvisorRun, ProcessingJob
 from app.schemas import JobCreate
 from app.services.job_state import recover_expired
 from app.services.jobs import get_job, job_dict, submit_job
@@ -36,13 +36,17 @@ def job_detail(session_id: str, job_id: str, db: Session = Depends(get_db)) -> d
 def session_usage(session_id: str, db: Session = Depends(get_db)) -> dict:
     get_session_or_404(db, session_id)
     jobs = list(db.scalars(select(ProcessingJob).where(ProcessingJob.session_id == session_id)))
+    advice_runs = list(db.scalars(select(AdvisorRun).where(AdvisorRun.session_id == session_id)))
     tokens = {"prompt_tokens": 0, "completion_tokens": 0, "cached_tokens": 0, "reasoning_tokens": 0}
     known_cost = 0.0
     unknown_cost_jobs = 0
+    unknown_cost_advice = 0
     asr_seconds = 0
     statuses: dict[str, int] = {}
-    for job in jobs:
-        statuses[job.status] = statuses.get(job.status, 0) + 1
+    advice_statuses: dict[str, int] = {}
+    for job in [*jobs, *advice_runs]:
+        counts = advice_statuses if isinstance(job, AdvisorRun) else statuses
+        counts[job.status] = counts.get(job.status, 0) + 1
         metrics = job.metrics or {}
         attempts = metrics.get("attempts") or [{"usage": metrics.get("usage", {})}]
         for attempt in attempts:
@@ -55,11 +59,16 @@ def session_usage(session_id: str, db: Session = Depends(get_db)) -> dict:
         if isinstance(estimate, (int, float)):
             known_cost += estimate
         if metrics.get("cost_status") not in ("estimated", "not_billed"):
-            unknown_cost_jobs += 1
+            if isinstance(job, AdvisorRun):
+                unknown_cost_advice += 1
+            else:
+                unknown_cost_jobs += 1
         seconds = metrics.get("billed_duration_seconds")
         if type(seconds) is int and seconds >= 0:
             asr_seconds += seconds
     return {"job_count": len(jobs), "jobs_by_status": statuses, "reported_tokens": tokens,
+            "advisor_run_count": len(advice_runs), "advisor_runs_by_status": advice_statuses,
             "reported_asr_seconds": asr_seconds, "known_estimated_cost_cny": round(known_cost, 8),
             "jobs_with_unknown_or_partial_cost": unknown_cost_jobs,
-            "notice": "仅汇总供应商已返回用量；估算不等于账单，失败和重试可能产生尚未报告的费用。"}
+            "advisor_runs_with_unknown_or_partial_cost": unknown_cost_advice,
+            "notice": "包含普通任务与实时助手（包括失败、过期及取消结果）的已报告用量；估算不等于账单，失败和重试可能产生尚未报告的费用。"}

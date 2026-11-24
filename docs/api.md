@@ -1,7 +1,7 @@
-# 诊录助手接口说明（v0.2）
+# 诊录助手接口说明（v0.4）
 
 - Base URL：`http://127.0.0.1:8000/api`
-- 数据格式：请求与响应均为 UTF-8 JSON；音频上传使用 `multipart/form-data`。
+- 数据格式：普通接口使用 UTF-8 JSON；音频上传使用 `multipart/form-data`，实时订阅使用 SSE。
 - 交互式文档：启动后端后访问 `http://127.0.0.1:8000/docs`。
 - 语音识别使用 Fun-ASR，草稿和会话问答使用千问，响应中的 `provider` 和 `notice` 标识结果来源。`is_mock` 保留为历史数据来源标记，新手动录入及云端结果为 false。
 
@@ -121,6 +121,8 @@
   "is_mock": false,
   "language": "zh-CN",
   "notice": "由 Fun-ASR 转写，请核对原文。",
+  "revision": 1,
+  "state": "final",
   "created_at": "2026-10-27T08:51:10Z",
   "has_reliable_timestamps": true,
   "segments": [
@@ -225,7 +227,10 @@
   "assistant_provider": "qwen-assistant:qwen3.7-plus",
   "assistant_is_mock": false,
   "job_worker_enabled": true,
-  "dialogue_provider": "explicit-dialogue-rules-v1"
+  "dialogue_provider": "explicit-dialogue-rules-v1",
+  "clinical_advisor": "qwen-clinical-advisor:qwen3.7-plus",
+  "live_assistant_enabled": true,
+  "live_assistant_worker_enabled": true
 }
 ```
 
@@ -303,12 +308,13 @@ curl -X POST "http://127.0.0.1:8000/api/sessions/{session_id}/audio" \
 
 调用 Fun-ASR 转写当前音频，同步接口返回 `SessionDetail`。
 
-- 前置条件：会话已有音频，且尚无转写。
+- 前置条件：会话已有音频，且尚无转写或上次音频转写已中断。
 - `ZHENLU_ASR_PROVIDER=fun-asr` 时，后端通过 WebSocket 将当前音频分片发送至 Fun-ASR 实时接口，仅保留 `sentence_end=true` 的最终句子，并使用接口返回的 `begin_time`/`end_time` 作为毫秒时间戳。
 - Fun-ASR 实时结果标记 `transcript.is_mock=false`，`provider` 为 `fun-asr:<model>`；该接口未返回说话人信息，所有句子 `speaker` 为 `未知`。
 - Fun-ASR 的 WAV 输入必须为单声道 16-bit PCM；非 WAV 格式使用配置的采样率，必须与实际音频一致。当前支持 `wav`、`mp3`、`aac`、`amr`、`opus`、`speex`；上传允许的 `ogg`、`webm`、`flac`、`m4a` 会返回 `502 fun_asr_unsupported_format`，需要先转码。
 - 本接口保持同步兼容；也可提交 transcribe 后台任务。Fun-ASR 仍按约 100 ms 分片发送音频，后台执行不改变传输耗时。
 - 若提供方抛错，会话状态变为 `failed`、`error_message` 给出提示，接口返回 `502`；再次调用可重试。
+- 最终句子实时保存，`state=streaming`；全部完成后改为 `final` 并递增转录 `revision`。部分失败时保存已识别句子并标记 `interrupted`，禁止直接生成病历。重试会重新识别同一录音并保留匹配句子的 ID；若识别内容与已保存句子冲突，拒绝覆盖，需核对录音或新建会话。更换 ASR 模型也需新建会话。
 
 #### `GET /sessions/{session_id}/transcript`
 
@@ -318,7 +324,7 @@ curl -X POST "http://127.0.0.1:8000/api/sessions/{session_id}/audio" \
 
 #### `POST /sessions/{session_id}/draft`
 
-基于当前转写生成五个字段。前置条件：已有转写、尚无草稿。返回 `SessionDetail`。
+基于当前转写生成五个字段。前置条件：已有 `state=final` 的转写、尚无草稿。返回 `SessionDetail`。增量转录未结束时，生成、重生成及角色整理返回 `409 transcript_not_final`。
 
 - 五个字段全部返回；未提及的信息值为“未提及”，不会改成“无”。
 - 服务端校验来源句子 ID；真实模型出现非法引用、缺失字段或无来源事实时拒绝整个结果。
@@ -421,7 +427,7 @@ curl -X POST "http://127.0.0.1:8000/api/sessions/{session_id}/audio" \
 awaiting_audio → audio_ready → transcribed → draft_ready → confirmed
 ```
 
-任一提供方失败时进入 `failed`；对应资源尚未写入，修复或重试后可重新执行当前步骤。
+转写或病历提供方失败时进入 `failed`；已保存的原文和已有病历保留，修复或重试后可重新执行当前步骤。实时助手有独立状态，失败不会把会话改为 `failed`。
 
 ## 5. 服务配置
 
@@ -437,3 +443,171 @@ awaiting_audio → audio_ready → transcribed → draft_ready → confirmed
 ## 6. 后台任务、角色整理与会话助手（2026-11-04）
 
 新增接口、幂等规则、任务状态、问答来源结构、上传 SHA-256 校验与恢复方式，见[后端开发进度与联调](后端开发进度与联调.md)。`GET /health` 额外返回 `assistant_provider`、`assistant_is_mock`、`dialogue_provider`、`job_worker_enabled`。会话详情新增 `dialogue`（未整理时为 null），音频新增 `sha256`（旧记录可能为 null）。原有同步接口返回结构保持兼容。
+
+## 7. 增量转录与实时临床助手（v0.3）
+
+新链路：最终识别句子 → 原文及版本落库 → 独立助手队列 → 千问分析 → 带引用的建议历史 → SSE / 轮询。问答助手仍负责查询当前会话事实，实时临床助手负责主动提出补问及诊疗思路，两者不会把推断自动写入病历。
+
+### 7.1 输入路径
+
+上传音频的 `transcribe` 任务会自动逐句保存 Fun-ASR 的 `sentence_end=true` 结果，不保存未确定的识别假设；无需再调用下面的外部转录接口。
+
+其他 ASR 或采集端已有最终文本时，可使用外部输入接口。这些接口接收文本，不接收实时音频流；ESP32 的边录边传音频协议还需单独接入。两条输入路径不能在同一会话混用。
+
+| 方法 | 路径（均以 `/api` 开头） | 行为 |
+| --- | --- | --- |
+| POST | `/sessions/{id}/transcript/stream` | 创建外部转录，返回 `revision=0, state=streaming`；重复调用返回已有打开的转录 |
+| POST | `/sessions/{id}/transcript/stream/segments` | 原子追加一批最终句子，返回最新转录 |
+| POST | `/sessions/{id}/transcript/stream/complete` | 接收 `expected_revision`，结束转录；返回 `state=final`，版本再加 1 |
+| GET | `/sessions/{id}/transcript` | 读取当前已保存的原文，也可在转录未结束时读取 |
+
+追加示例：
+
+```json
+{
+  "request_id": "device-01-batch-0001",
+  "expected_revision": 0,
+  "segments": [
+    {"seq": 0, "speaker": "患者", "text": "咳嗽三天，没有发热。", "start_ms": 300, "end_ms": 2600}
+  ]
+}
+```
+
+- 每批 1–50 句，`seq` 从 0 开始，连续递增；一批成功追加后转录 `revision` 加 1。音频 ASR 使用上游句号 ID，序号可能不从 0 开始或不连续，客户端不要用它作为数组下标。
+- 单句最多 4000 字符；整份外部/增量 ASR 转录最多 2000 句或 100000 字符。时间戳同时提供或同时为空，结束时间大于开始时间；speaker 未知时保持 `未知`，不能把匿名声纹当作医患角色。
+- 相同 `request_id` 和相同内容的重放不重复保存，即使转录已结束也可重放；返回的是最新完整转录。相同编号用于不同内容返回 `409 idempotency_conflict`。
+- 新批次的版本过期返回 `409 transcript_revision_conflict`；序号不连续返回 `409 segment_sequence_conflict`；结束后新写入返回 `409 transcript_closed`。
+- 空转录不能结束。成功结束的重放接受结束前或结束后的版本。转录完成前禁止整理角色或生成正式草稿。
+- 外部转录及待分析队列跨重启保留，可用原批次编号重放。音频转写任务被中断时保留最终句子并标记 `interrupted`，按 3.4 节重试。
+
+### 7.2 临床建议与控制
+
+| 方法 | 路径 | 行为 |
+| --- | --- | --- |
+| GET | `/sessions/{id}/assistant/advice` | 当前转录版本、助手状态、当前/较早建议 |
+| PUT | `/sessions/{id}/assistant/advice/settings` | `{"enabled":true}` 或 `false`；按会话启停 |
+| POST | `/sessions/{id}/assistant/advice/refresh` | `202`，为失败或尚未分析的当前版本排队；已成功或正在分析的相同版本不重复收费 |
+| GET | `/sessions/{id}/assistant/advice/history?limit=20&offset=0` | 最近分析历史，包括失败、过期和取消结果；limit 最大 100 |
+| GET | `/sessions/{id}/usage` | 普通任务和实时助手的合并用量及估算费用 |
+
+主要状态字段：
+
+| 字段 | 含义 |
+| --- | --- |
+| `enabled` | 本会话启用设置，默认 true |
+| `available` / `worker_enabled` | 全局助手配置是否启用 / 后台执行器是否启用；两者均为 true 才会自动运行 |
+| `transcript_revision` / `transcript_state` | 当前转录版本与完整性 |
+| `pending` / `active_run_id` / `run_count` | 是否排队、当前运行 ID、已启动轮数 |
+| `current` | 成功且与当前转录版本一致的分析；否则为 null |
+| `previous` | 已过期、关闭或会话确认后不可作为当前建议的最近完成分析；否则为 null |
+| `error` | 失败代码及提示；转录和病历不受影响 |
+
+`current` / `previous` 和历史条目包含 `id`、`transcript_id`、`transcript_revision`、`transcript_state`、`provider`、`status`、`suggestions`、`metrics`、起止时间及错误。分析状态为 `running`、`succeeded`、`superseded`、`failed`、`interrupted` 或 `cancelled`。
+
+建议示例（示意结构，不是模型准确性保证）：
+
+```json
+{
+  "id": "<run-id>:0",
+  "category": "examination",
+  "title": "核实体温和呼吸情况",
+  "suggestion": "可结合实测体温及呼吸系统查体，判断后续检查是否有必要。",
+  "rationale": "原文提到咳嗽且否认发热，当前信息不足以确定病因。",
+  "source_segment_ids": ["<segment-id>"],
+  "sources": [{"id": "<segment-id>", "seq": 0, "speaker": "患者", "text": "咳嗽三天，没有发热。", "start_ms": 300, "end_ms": 2600}],
+  "missing_information": ["年龄、基础病和查体结果"],
+  "basis_kind": "model_reasoning",
+  "requires_clinician_review": true
+}
+```
+
+类别为 `follow_up`（补问）、`clarification`（核对）、`diagnostic_consideration`（鉴别诊断思路）、`examination`（检查参考）、`treatment`（治疗方向）、`red_flag`（警示线索）。返回空数组表示本轮未生成建议，不能据此判断病情安全。
+
+每条建议必须引用本次输入中存在的原文 ID，并列出影响判断的缺失信息。服务器拒绝格式非法、跨会话或不存在的引用；这种校验不验证临床结论正确性。`medical_references_retrieved=false` 表示未接医学指南检索，原文引用支持病例线索，不是指南引用。提示词要求保留否定、主体和不确定性，不将未知信息默认正常；诊疗方向供医生评估，不自动处方、执行治疗或写入病历。
+
+新句子到达时，旧分析只能成为 `previous`，界面必须标记“基于较早转录，待更新”，不能作为当前结论；下一轮只分析合并后的最新版本。关闭助手或病历确认后，迟到结果不能恢复成当前建议。关闭不能撤销已经发出的上游请求，该请求的用量仍记录。租约过期的分析标记中断，不自动为同一快照重复调用；可手动重试或等待新增文本。
+
+默认合并窗口 2 秒、同会话启动间隔 10 秒、累计上限 60 轮；失败、取消和过期轮次也计数，手动刷新不绕过上限。每轮沿用千问客户端总超时/单次超时与最多一次重试；实际延迟还包含排队和模型耗时。队列持久化，与音频/病历任务互不占用同一执行线程。本机原型每进程一个助手线程，多个会话按队列依次分析。超出 150000 字符的序列化上下文会停止该轮分析并保留原文，不静默截断病史。
+
+`/usage` 原有 token/费用总量现在包含助手调用；新增 `advisor_run_count`、`advisor_runs_by_status`、`advisor_runs_with_unknown_or_partial_cost`。失败、被替代及关闭后返回的调用也统计已报告用量，估算不等于供应商账单。
+
+### 7.3 SSE 推送与重连
+
+`GET /sessions/{id}/live/events` 返回 `text/event-stream`。初次连接立即发送完整快照，此后约每秒检查变化，变化时发送 `snapshot` 事件；无变化约每 15 秒发心跳注释。每次读取使用短数据库会话，不在等待模型或 SSE 连接期间持有事务。
+
+```javascript
+const feed = new EventSource(`/api/sessions/${sessionId}/live/events`);
+feed.addEventListener('snapshot', event => {
+  const { transcript, assistant } = JSON.parse(event.data);
+  // 用整份快照替换本地内容。current 与 previous 分开展示，并标明版本。
+});
+// 页面离开时：feed.close();
+```
+
+重连返回最新完整快照；当前无事件日志重放，不依赖 `Last-Event-ID`。此接口推送的是已经保存的句子及整轮助手结果，不是 LLM token 流。部署反向代理时关闭 SSE 缓冲并为长连接设置合理超时。也可通过转录与建议 GET 接口轮询。
+
+### 7.4 PowerShell 联调
+
+后端配置真实密钥并启动后，可用虚构文本检查链路（会产生实际模型调用费用）：
+
+```powershell
+$baseUri = 'http://127.0.0.1:8000/api'
+function Send-Json($path, $payload) {
+    $body = [System.Text.Encoding]::UTF8.GetBytes(($payload | ConvertTo-Json -Depth 8))
+    Invoke-RestMethod -Method Post -Uri "$baseUri$path" -ContentType 'application/json; charset=utf-8' -Body $body
+}
+$session = Send-Json '/sessions' @{patient_name='虚构联调病例'}
+$sid = $session.id
+Invoke-RestMethod -Method Post -Uri "$baseUri/sessions/$sid/transcript/stream"
+Send-Json "/sessions/$sid/transcript/stream/segments" @{
+    request_id='batch-001'; expected_revision=0
+    segments=@(@{seq=0; speaker='患者'; text='咳嗽三天，没有发热。'})
+}
+Invoke-RestMethod "$baseUri/sessions/$sid/assistant/advice" | ConvertTo-Json -Depth 12
+curl.exe -N "$baseUri/sessions/$sid/live/events"
+```
+
+观察 `pending → active_run_id → current`；模型返回前 `current` 为 null。按 Ctrl+C 停止订阅后，可继续追加下一批并使用最新 revision，或完成转录：
+
+```powershell
+$transcript = Invoke-RestMethod "$baseUri/sessions/$sid/transcript"
+Send-Json "/sessions/$sid/transcript/stream/complete" @{expected_revision=$transcript.revision}
+Invoke-RestMethod "$baseUri/sessions/$sid/usage" | ConvertTo-Json -Depth 8
+```
+
+`/health` 用于检查 `clinical_advisor` 和 `live_assistant_worker_enabled`，不代表已验证上游模型权限。自动化测试使用临时数据库、供应商协议响应替身与虚构资料，不调用真实服务，也不能证明真实模型的医疗准确率、延迟或账单金额。
+
+<a id="follow-up-api"></a>
+
+## 8. 患者档案、复诊回顾与持续事项（v0.4）
+
+路径前缀为 `/api`。运行后从 `/openapi.json` 获取类型定义，从 `/docs` 调用接口。所有 ID 作为不透明字符串传递，日期时间为 UTC。现有按姓名建会话的调用继续支持，返回新增的 `patient_id` 可为空。
+
+| 请求 | 请求或参数 | 成功结果 |
+| --- | --- | --- |
+| POST /patients | patient_name 必填，patient_ref 可选；非空外部编号唯一，重名允许 | 201，患者 id、patient_name、patient_ref |
+| GET /patients | query 匹配姓名、外部编号或完整 id，limit 默认 30，上限 100，offset 默认 0 | 200，items 数组 |
+| POST /sessions | 选定档案时传 patient_id；同时传姓名或编号时必须与所选档案一致 | 201，会话详情 |
+| PUT /sessions/{id}/patient | patient_id。医生核对后绑定未关联的旧会话；允许转录前或病历已确认后绑定 | 200，会话详情。同一绑定可重放。原有病历和确认快照保留原始称呼 |
+| GET /sessions/{id}/follow-up-summary | 无请求体 | 200，session_id、patient_id、previous_record、comparisons、pending_items |
+| GET /sessions/{id}/items | 无请求体 | 200，items 数组。含本次可见的自动事项、医生建立或已处理的事项及从已确认就诊带入的随访 |
+| POST /sessions/{id}/items | request_id、title、actor 必填，carry_forward 默认 false | 201，事项及 actions；同一会话相同请求重放返回同一事项最新状态 |
+| PATCH /sessions/{id}/items/{item_id} | expected_revision、actor、status 必填，result 和 carry_forward 可选 | 200，事项及完整操作轨迹；遗漏 result 时保留旧值，提交空字符串可清空 |
+| GET /sessions/{id}/live/snapshot | 无请求体 | 200，transcript、assistant 和 items，结构与 SSE snapshot 事件相同 |
+
+**复诊的时间范围。** previous_record 是同一患者在本次会话创建前已确认的最近一次就诊，包含 session_id、record_id、version、visit_started_at、confirmed_at 和带原文来源的五字段。草稿及其他患者记录不参与。comparisons 逐字段对照历史和已保存的本次草稿。awaiting_draft 表示等待本次草稿，not_mentioned 表示本次未提及，same_text 和 different_text 只比较文本；病情好转或恶化须由医生判断。编辑或确认本次草稿后重新读取摘要。
+
+**事项操作。** status 接受 open（待核实）、asked（已问待答）、resolved（已解决）、dismissed（已忽略）。carry_forward 是独立布尔值，已结或忽略时自动关闭。可以用 result 记录“患者记不清”或“已核对报告”。动作保留 actor、session_id、revision、时间与处理结果。本机原型由客户端填写 actor。确认病历后不能在该次会话中修改事项，仍待随访的事项从下一次就诊处理。
+
+**当前与历史依据。** 本次 suggestions[].sources 引用当前转录；history_sources 指向历史 session_id、record_id、version、field_key、value 和 confirmed_at。历史五字段及其原句可从 previous_record.fields 或旧会话的 /record 读取。只有补问与核对生成可处理 item_id，旧数据和其他类别可为 null。前端按 item_id 处理和去重；单轮建议 id 仅用于定位历史。医生处理后 /assistant/advice 的 current 和新的 SSE 快照都会过滤该条主动提示，/assistant/advice/history 保留分析时的结果。
+
+**业务错误。** 422 validation_error 表示输入无效。404 patient_not_found 或 item_not_found 表示当前上下文无此对象。409 patient_ref_conflict、patient_identity_conflict、patient_already_linked、session_in_progress 分别提示核对重复编号、身份不匹配、已绑定或绑定时机。409 patient_link_required 表示跨次随访需要先关联档案。相同 request_id 提交不同内容返回 409 idempotency_conflict。版本过期返回 409 item_revision_conflict，重新读取事项及 actions 后再决定是否修改；已确认会话写操作返回 409 session_confirmed。
+
+### 四组前端联调样例
+
+以下使用同一位虚构患者。请求中的 P、A、B、I 均替换为前一步实际返回的 ID。
+
+1. **初诊。** POST /patients 提交 `{"patient_name":"虚构患者甲","patient_ref":"TEST-001"}` 得到 P。POST /sessions 提交 `{"patient_id":"P"}` 得到 A。读取 A 的 follow-up-summary，预期 previous_record 为 null，comparisons、pending_items 均为空数组。在 A 的 items 提交 `{"request_id":"first-follow-1","title":"下次核对复查结果","actor":"医生甲","carry_forward":true}` 得到 I。按第 3 节完成录入、生成及确认。
+2. **复诊。** 使用 P 再创建会话 B。读取 B 的 follow-up-summary，可见 A 的确认版本及 I。在 B 的 items/I 提交 PATCH `{"expected_revision":1,"actor":"医生乙","status":"resolved","result":"已核对复查结果"}`。再次查询，I 从 pending_items 移出，B 的 items 仍保留原始会话及两次操作。
+3. **历史与本次说法冲突。** 测试资料中 A 的用药史记有曾用某药，B 按第 7 节追加“患者：我已停用之前的药”。核对类建议若引用该历史字段，sources 指向 B 的原句，history_sources 指向 A 的 medication_history。医生处理建议时使用 item_id 和事项实际 revision。过期 PATCH 返回 409，旧病历原文和本次草稿不会被该动作改写。模型是否识别差异需单独评测。
+4. **断线重连。** 前端订阅 B 的 live/events 并监听 snapshot。断开连接期间从另一客户端标记事项，重新订阅后用首个快照整体替换本地 transcript、assistant 和 items。GET live/snapshot 可用于无 SSE 的联调，返回相同数据结构，无需恢复旧事件游标。

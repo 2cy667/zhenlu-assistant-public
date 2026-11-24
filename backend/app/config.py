@@ -42,6 +42,11 @@ class Settings(BaseSettings):
     qwen_input_price_per_million: float | None = Field(default=None, ge=0)
     qwen_output_price_per_million: float | None = Field(default=None, ge=0)
     assistant_provider: Literal["qwen"] = "qwen"
+    assistant_model: str = "qwen3.7-plus"
+    live_assistant_enabled: bool = True
+    live_assistant_debounce_seconds: float = Field(default=2.0, ge=0, le=30)
+    live_assistant_min_interval_seconds: float = Field(default=10.0, ge=0, le=120)
+    live_assistant_max_runs_per_session: int = Field(default=60, ge=1, le=1000)
     dialogue_provider: str = "rules"
     job_worker_enabled: bool = True
     job_poll_interval_seconds: float = Field(default=0.5, ge=0.05, le=30)
