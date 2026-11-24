@@ -43,10 +43,11 @@ SUPPORTED_AUDIO_FORMATS: dict[str, str] = {
 class AsrProviderError(Exception):
     """A user-safe ASR error that never contains credentials or raw upstream text."""
 
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(self, code: str, message: str, metadata: dict | None = None) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
+        self.metadata = metadata or {}
 
 
 @dataclass(frozen=True)
@@ -121,6 +122,10 @@ def _parse_sentence_event(payload: object) -> _SentenceEvent | None:
 
 def _record_sentence(state: _TaskState, event: _SentenceEvent) -> None:
     if not event.is_final:
+        return
+    if event.sentence_id in state.sentences:
+        if state.sentences[event.sentence_id] != (event.text, event.start_ms, event.end_ms):
+            raise AsrProviderError("fun_asr_final_sentence_changed", "语音服务修改了已经确定的句子，已保存原文保留，请核对录音。")
         return
     state.sentences[event.sentence_id] = (event.text, event.start_ms, event.end_ms)
     if event.billed_seconds is not None:
@@ -269,6 +274,7 @@ def _receive_events(
     ready: Event,
     finished: Event,
     deadline: float,
+    on_segment: Callable[[int, AsrSegment], None] | None = None,
 ) -> None:
     try:
         while True:
@@ -317,7 +323,10 @@ def _receive_events(
             elif event_name == "result-generated":
                 sentence = _parse_sentence_event(event.get("payload"))
                 if sentence is not None:
+                    is_new = sentence.is_final and sentence.sentence_id not in state.sentences
                     _record_sentence(state, sentence)
+                    if is_new and on_segment:
+                        on_segment(sentence.sentence_id, AsrSegment("未知", sentence.text, sentence.start_ms, sentence.end_ms))
             elif event_name == "task-finished":
                 state.finished = True
                 break
@@ -326,6 +335,11 @@ def _receive_events(
                 state.error = AsrProviderError("fun_asr_failed", _failure_message(header))
                 state.finished = True
                 break
+    except AsrProviderError as exc:
+        state.error = exc
+    except Exception as exc:
+        logger.error("ASR sentence persistence failed (%s)", type(exc).__name__)
+        state.error = AsrProviderError("fun_asr_persistence_failed", "转写句子保存失败，已保存原文保留，请核对后重试。")
     finally:
         if state.error is None and not state.finished:
             state.error = AsrProviderError(
@@ -368,6 +382,7 @@ class FunAsrProvider:
     """Streams an uploaded audio file to Fun-ASR-Realtime and returns final sentences."""
 
     is_mock = False
+    supports_incremental = True
 
     def __init__(
         self,
@@ -428,7 +443,7 @@ class FunAsrProvider:
             chunk_interval=settings.fun_asr_chunk_interval_seconds,
         )
 
-    def transcribe(self, audio_path: Path, original_filename: str) -> AsrResult:
+    def transcribe(self, audio_path: Path, original_filename: str, *, on_segment: Callable[[int, AsrSegment], None] | None = None) -> AsrResult:
         audio_format, sample_rate, chunk_size = _prepare_audio(
             audio_path,
             original_filename,
@@ -449,7 +464,7 @@ class FunAsrProvider:
             )
             Thread(
                 target=_receive_events,
-                args=(connection, state, ready, finished, deadline),
+                args=(connection, state, ready, finished, deadline, on_segment),
                 name="fun-asr-receiver",
                 daemon=True,
             ).start()
@@ -488,13 +503,15 @@ class FunAsrProvider:
                 )
             self._raise_for_error(state)
             return self._build_result(state, audio_format, sample_rate)
-        except AsrProviderError:
+        except AsrProviderError as exc:
+            exc.metadata = self._metrics(state, audio_format, sample_rate)
             raise
         except (websocket.WebSocketException, OSError) as exc:
             logger.warning("Fun-ASR transcription failed: %s", type(exc).__name__)
             raise AsrProviderError(
                 "fun_asr_connection_failed",
                 "语音识别服务连接或音频发送失败，请稍后重试。",
+                self._metrics(state, audio_format, sample_rate),
             ) from None
         finally:
             _close_quietly(connection)
@@ -558,11 +575,11 @@ class FunAsrProvider:
             is_mock=False,
             language=self._language,
             notice=notice,
-            metadata={
-                "model": self._model,
-                "format": audio_format,
-                "sample_rate": sample_rate,
-                "sentence_count": len(segments),
-                "billed_duration_seconds": state.billed_seconds,
-            },
+            metadata=self._metrics(state, audio_format, sample_rate),
         )
+
+    def _metrics(self, state: _TaskState, audio_format: str, sample_rate: int) -> dict:
+        return {
+            "model": self._model, "format": audio_format, "sample_rate": sample_rate,
+            "sentence_count": len(state.sentences), "billed_duration_seconds": state.billed_seconds,
+        }

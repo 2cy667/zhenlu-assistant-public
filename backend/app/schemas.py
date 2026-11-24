@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 FieldKey = Literal[
@@ -17,13 +17,15 @@ FieldKey = Literal[
 # ---------- 请求参数 ----------
 
 
-class SessionCreate(BaseModel):
+class PatientCreate(BaseModel):
     patient_name: str = Field(min_length=1, max_length=80)
     patient_ref: str | None = Field(default=None, max_length=120)
 
     @field_validator("patient_name")
     @classmethod
-    def strip_patient_name(cls, value: str) -> str:
+    def strip_patient_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
         value = value.strip()
         if not value:
             raise ValueError("患者称呼不能为空")
@@ -36,6 +38,21 @@ class SessionCreate(BaseModel):
             return None
         value = value.strip()
         return value or None
+
+
+class PatientLink(BaseModel):
+    patient_id: str = Field(min_length=1, max_length=32)
+
+
+class SessionCreate(PatientCreate):
+    patient_name: str | None = Field(default=None, min_length=1, max_length=80)
+    patient_id: str | None = Field(default=None, min_length=1, max_length=32)
+
+    @model_validator(mode="after")
+    def require_identity(self):
+        if not self.patient_name and not self.patient_id:
+            raise ValueError("请提供患者称呼或已选患者 ID")
+        return self
 
 
 class DraftFieldInput(BaseModel):
@@ -146,6 +163,8 @@ class TranscriptOut(BaseModel):
     is_mock: bool
     language: str
     notice: str
+    revision: int
+    state: Literal["streaming", "final", "interrupted"]
     created_at: str
     has_reliable_timestamps: bool
     segments: list[SegmentOut]
@@ -203,6 +222,7 @@ class ConfirmedRecordOut(BaseModel):
 
 class SessionSummaryOut(BaseModel):
     id: str
+    patient_id: str | None
     patient_name: str
     patient_ref: str | None
     status: str
@@ -244,3 +264,42 @@ class HealthOut(BaseModel):
     assistant_is_mock: bool
     job_worker_enabled: bool
     dialogue_provider: str
+    clinical_advisor: str | None = None
+    live_assistant_enabled: bool = False
+    live_assistant_worker_enabled: bool = False
+
+
+class LiveSegmentInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    seq: int = Field(ge=0, le=100000, strict=True)
+    text: str = Field(min_length=1, max_length=4000)
+    speaker: str = Field(default="未知", min_length=1, max_length=20)
+    start_ms: int | None = Field(default=None, ge=0, strict=True)
+    end_ms: int | None = Field(default=None, ge=0, strict=True)
+
+    @field_validator("text", "speaker")
+    @classmethod
+    def nonblank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("文本或说话人不能为空")
+        return value.strip()
+
+    @model_validator(mode="after")
+    def timestamps(self):
+        if (self.start_ms is None) != (self.end_ms is None):
+            raise ValueError("时间戳应同时提供或同时留空")
+        if self.start_ms is not None and self.end_ms <= self.start_ms:
+            raise ValueError("结束时间必须晚于开始时间")
+        return self
+
+
+class TranscriptAppend(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    request_id: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_.:-]+$")
+    expected_revision: int = Field(ge=0, strict=True)
+    segments: list[LiveSegmentInput] = Field(min_length=1, max_length=50)
+
+
+class LiveAssistantControl(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = Field(strict=True)

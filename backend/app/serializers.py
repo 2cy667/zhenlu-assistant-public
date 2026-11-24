@@ -60,6 +60,8 @@ def transcript_dict(transcript: Transcript) -> dict[str, Any]:
         "is_mock": transcript.is_mock,
         "language": transcript.language,
         "notice": transcript.notice,
+        "revision": transcript.revision,
+        "state": transcript.state,
         "created_at": iso_utc(transcript.created_at),
         "has_reliable_timestamps": has_timestamps,
         "segments": segments,
@@ -167,6 +169,7 @@ def latest_record(session: ConsultationSession) -> ConfirmedRecord | None:
 def session_summary_dict(session: ConsultationSession) -> dict[str, Any]:
     return {
         "id": session.id,
+        "patient_id": session.patient_id,
         "patient_name": session.patient_name,
         "patient_ref": session.patient_ref,
         "status": session.status,

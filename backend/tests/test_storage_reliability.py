@@ -38,18 +38,39 @@ def test_upgrade_has_consistent_backup_and_idempotent_schema(settings):
     with TestClient(create_app(settings)) as client:
         sid = client.post("/api/sessions", json={"patient_name": "虚构迁移病例"}).json()["id"]
         client.post(f"/api/sessions/{sid}/transcript/manual", json={"text": "患者：咳嗽。"})
+        draft = client.post(f"/api/sessions/{sid}/draft").json()["draft"]
+        before = client.post(f"/api/sessions/{sid}/confirm", json={"expected_revision": draft["revision"]}).json()
     path = Path(settings.database_url.removeprefix("sqlite:///"))
     with sqlite3.connect(path) as db:
         db.execute("ALTER TABLE audio_files DROP COLUMN sha256")
         db.execute("DROP TABLE schema_migrations")
+        db.execute("""CREATE TABLE old_sessions (
+            id VARCHAR(32) PRIMARY KEY, patient_name VARCHAR(80) NOT NULL, patient_ref VARCHAR(120),
+            status VARCHAR(32) NOT NULL, error_message TEXT, confirmed_version INTEGER NOT NULL,
+            created_at DATETIME NOT NULL, updated_at DATETIME NOT NULL)""")
+        db.execute("""INSERT INTO old_sessions SELECT id, patient_name, patient_ref, status,
+            error_message, confirmed_version, created_at, updated_at FROM consultation_sessions""")
+        db.execute("DROP TABLE consultation_sessions")
+        db.execute("ALTER TABLE old_sessions RENAME TO consultation_sessions")
+        for table in ("consultation_item_actions", "consultation_items", "patients"):
+            db.execute(f"DROP TABLE {table}")
+        for table in ("advisor_runs", "advisor_states", "transcript_batches"):
+            db.execute(f"DROP TABLE {table}")
+        db.execute("ALTER TABLE transcripts DROP COLUMN revision")
+        db.execute("ALTER TABLE transcripts DROP COLUMN state")
         db.commit()
     with TestClient(create_app(settings)) as client:
-        assert client.get(f"/api/sessions/{sid}").json()["transcript"]["segments"][0]["text"] == "患者：咳嗽。"
+        after = client.get(f"/api/sessions/{sid}").json()
+        assert after["patient_id"] is None
+        assert client.get(f"/api/sessions/{sid}/follow-up-summary").json()["previous_record"] is None
+        assert after["transcript"] == before["transcript"]
+        assert after["latest_record"] == before["latest_record"]
     backups = list((path.parent / "backups").glob("*.sqlite3"))
     assert len(backups) == 1
     with sqlite3.connect(backups[0]) as backup:
         assert backup.execute("SELECT patient_name FROM consultation_sessions WHERE id=?", (sid,)).fetchone()[0] == "虚构迁移病例"
         assert "sha256" not in [r[1] for r in backup.execute("PRAGMA table_info(audio_files)")]
+        assert "revision" not in [r[1] for r in backup.execute("PRAGMA table_info(transcripts)")]
         assert backup.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
     with TestClient(create_app(settings)) as client:
         assert client.get(f"/api/sessions/{sid}").status_code == 200

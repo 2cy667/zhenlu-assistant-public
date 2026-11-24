@@ -36,23 +36,36 @@ class Database:
         self._backup_before_upgrade()
         Base.metadata.create_all(self.engine)
         self._allow_text_only_transcripts()
+        with self.engine.begin() as connection:
+            session_columns = {c["name"] for c in inspect(connection).get_columns("consultation_sessions")}
+            if "patient_id" not in session_columns:
+                connection.execute(text("ALTER TABLE consultation_sessions ADD COLUMN patient_id VARCHAR(32) REFERENCES patients(id)"))
+                connection.execute(text("CREATE INDEX IF NOT EXISTS ix_consultation_sessions_patient_id ON consultation_sessions (patient_id)"))
+            columns = {c["name"] for c in inspect(connection).get_columns("transcripts")}
+            if "revision" not in columns:
+                connection.execute(text("ALTER TABLE transcripts ADD COLUMN revision INTEGER NOT NULL DEFAULT 1"))
+            if "state" not in columns:
+                connection.execute(text("ALTER TABLE transcripts ADD COLUMN state VARCHAR(20) NOT NULL DEFAULT 'final'"))
         columns = inspect(self.engine).get_columns("audio_files")
         if not any(c["name"] == "sha256" for c in columns):
             with self.engine.begin() as connection:
                 connection.execute(text("ALTER TABLE audio_files ADD COLUMN sha256 VARCHAR(64)"))
         with self.engine.begin() as connection:
             connection.execute(text("CREATE TABLE IF NOT EXISTS schema_migrations (version VARCHAR(80) PRIMARY KEY, applied_at VARCHAR(40) NOT NULL)"))
-            version = "20261104_jobs_assistant_audio_hash"
-            if not connection.execute(text("SELECT version FROM schema_migrations WHERE version=:version"), {"version": version}).first():
-                connection.execute(text("INSERT INTO schema_migrations (version, applied_at) VALUES (:version, :at)"), {"version": version, "at": datetime.now(UTC).isoformat()})
+            for version in ("20261116_live_assistant", "20261124_follow_up"):
+                if not connection.execute(text("SELECT version FROM schema_migrations WHERE version=:version"), {"version": version}).first():
+                    connection.execute(text("INSERT INTO schema_migrations (version, applied_at) VALUES (:version, :at)"), {"version": version, "at": datetime.now(UTC).isoformat()})
 
     def _backup_before_upgrade(self) -> None:
         inspector = inspect(self.engine)
         tables = inspector.get_table_names()
         if "consultation_sessions" not in tables or self.engine.dialect.name != "sqlite":
             return
-        missing = not {"processing_jobs", "assistant_turns", "structured_dialogues", "schema_migrations"}.issubset(tables)
+        missing = not {"processing_jobs", "assistant_turns", "structured_dialogues", "schema_migrations", "transcript_batches", "advisor_states", "advisor_runs"}.issubset(tables)
+        missing |= not {"patients", "consultation_items", "consultation_item_actions", "creation_requests"}.issubset(tables)
+        missing |= "patient_id" not in {c["name"] for c in inspector.get_columns("consultation_sessions")}
         if "transcripts" in tables:
+            missing |= not {"revision", "state"}.issubset({c["name"] for c in inspector.get_columns("transcripts")})
             missing |= any(c["name"] == "audio_file_id" and not c["nullable"] for c in inspector.get_columns("transcripts"))
         if "audio_files" in tables:
             missing |= not any(c["name"] == "sha256" for c in inspector.get_columns("audio_files"))

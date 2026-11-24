@@ -16,7 +16,10 @@ from app.errors import setup_exception_handlers
 from app.providers.registry import build_asr_provider, build_draft_provider
 from app.providers.assistant import build_assistant_provider
 from app.providers.dialogue import build_dialogue_provider
-from app.routers import assistant, audio, dialogue, drafts, jobs, records, sessions, transcripts
+from app.providers.clinical_advisor import build_clinical_advisor
+from app.routers import assistant, audio, dialogue, drafts, follow_up, jobs, live_assistant, records, sessions, transcripts
+from app.services.live_assistant import ClinicalAdvisorWorker
+from app.services.advice_state import recover_advisor_runs
 from app.services.job_state import recover_expired, recover_legacy_states
 from app.services.jobs import JobWorker
 from app.schemas import HealthOut
@@ -38,6 +41,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.draft_provider = build_draft_provider(settings)
         app.state.assistant_provider = build_assistant_provider(settings)
         app.state.dialogue_provider = build_dialogue_provider(settings)
+        app.state.clinical_advisor = build_clinical_advisor(settings) if settings.live_assistant_enabled else None
         database = Database(settings.database_url)
         database.create_all()
 
@@ -45,9 +49,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         with database.session_factory() as db:
             recover_expired(db)
             recover_legacy_states(db)
+            recover_advisor_runs(db)
         worker = JobWorker(app) if settings.job_worker_enabled else None
         if worker:
             worker.start()
+        advisor_worker = ClinicalAdvisorWorker(app) if settings.live_assistant_enabled and settings.job_worker_enabled else None
+        if advisor_worker:
+            advisor_worker.start()
         logger.info(
             "诊录助手启动：ASR=%s，草稿=%s，数据库=%s",
             app.state.asr_provider.name,
@@ -57,16 +65,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         try:
             yield
         finally:
+            if advisor_worker:
+                advisor_worker.stop()
             if worker:
                 worker.stop()
             database.dispose()
 
     app = FastAPI(
         title=settings.app_name,
-        version="0.2.0",
+        version="0.4.0",
         description=(
-            "诊录助手原型：音频转写、结构化病历、审核确认、带来源的会话问答，"
-            "支持真实模型配置、持久化处理任务和失败恢复。"
+            "诊录助手原型：增量音频转写、结构化病历、审核确认、会话问答及实时临床建议，"
+            "支持患者档案、复诊回顾、跨次事项、持久化处理任务和失败恢复。"
         ),
         lifespan=lifespan,
     )
@@ -99,6 +109,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     setup_exception_handlers(app)
 
     app.include_router(sessions.router, prefix="/api")
+    app.include_router(follow_up.router, prefix="/api")
     app.include_router(audio.router, prefix="/api")
     app.include_router(transcripts.router, prefix="/api")
     app.include_router(drafts.router, prefix="/api")
@@ -106,6 +117,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(jobs.router, prefix="/api")
     app.include_router(assistant.router, prefix="/api")
     app.include_router(dialogue.router, prefix="/api")
+    app.include_router(live_assistant.router, prefix="/api")
 
     @app.get("/api/health", response_model=HealthOut, tags=["系统"])
     def health(request: Request) -> dict:
@@ -121,6 +133,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "assistant_is_mock": request.app.state.assistant_provider.is_mock,
             "job_worker_enabled": settings.job_worker_enabled,
             "dialogue_provider": request.app.state.dialogue_provider.name,
+            "clinical_advisor": request.app.state.clinical_advisor.name if request.app.state.clinical_advisor else None,
+            "live_assistant_enabled": settings.live_assistant_enabled,
+            "live_assistant_worker_enabled": settings.live_assistant_enabled and settings.job_worker_enabled,
         }
 
     @app.get("/api/device/status", tags=["系统"])

@@ -39,11 +39,13 @@ def validate_operation(session, operation: str, payload: dict) -> None:
         assistant_context(session)
         return
     ensure_editable(session)
+    if operation in ("generate", "regenerate", "structure") and session.transcript and session.transcript.state != "final":
+        raise ApiError(409, "transcript_not_final", "请先完成转录，再整理角色或生成病历草稿。")
     if operation == "transcribe":
         if session.audio_file is None:
             raise ApiError(409, "audio_required", "请先上传音频，再开始转写。")
-        if session.transcript:
-            raise ApiError(409, "transcript_exists", "该会话已完成转写，不能重复执行。")
+        if session.transcript and session.transcript.state != "interrupted":
+            raise ApiError(409, "transcript_exists", "该会话已有转写，不能重复执行。")
     elif operation in ("generate", "structure"):
         if session.transcript is None:
             raise ApiError(409, "transcript_required", "请先录入问诊内容或完成转写，再生成病历草稿。")

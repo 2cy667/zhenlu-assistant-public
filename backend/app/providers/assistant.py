@@ -79,4 +79,4 @@ class QwenAssistantProvider:
 
 
 def build_assistant_provider(settings: Settings):
-    return QwenAssistantProvider(QwenJsonClient.from_settings(settings))
+    return QwenAssistantProvider(QwenJsonClient.from_settings(settings.model_copy(update={"qwen_model": settings.assistant_model})))
