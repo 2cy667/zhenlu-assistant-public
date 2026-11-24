@@ -141,6 +141,7 @@ export interface AudioChunk {
   retryable: boolean;
 }
 export interface RealtimeState {
+  guidance?: ConsultationGuidance | null;
   version: number;
   capture:
     | "idle"
@@ -156,6 +157,24 @@ export interface RealtimeState {
   draft_transcript_revision: number | null;
   final_draft_ready: boolean;
   chunks: AudioChunk[];
+}
+
+export type GuidanceStatus = "open" | "asked" | "resolved" | "dismissed";
+export interface GuidanceItem {
+  anchor_segment_id?: string | null;
+  id: string;
+  kind: "follow_up" | "verify";
+  question: string;
+  reason: string;
+  priority: "routine" | "important";
+  status: GuidanceStatus;
+  source_ids: string[];
+}
+export interface ConsultationGuidance {
+  revision: number;
+  transcript_revision: number;
+  status: "waiting" | "updating" | "ready" | "failed";
+  items: GuidanceItem[];
 }
 
 export interface SessionListResponse {

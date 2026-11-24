@@ -1,4 +1,5 @@
 import { RealtimeStatus } from "./RealtimeStatus";
+import { Modal } from "./Modal";
 import { RealtimeAudio } from "./RealtimeAudio";
 import { realtimeReady } from "../realtime";
 import { RecordExport } from "./RecordExport";
@@ -43,7 +44,10 @@ export function Workspace({
 }: WorkspaceProps) {
   const [realtimeFresh, setRealtimeFresh] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
-  const [mobilePane, setMobilePane] = useState("draft");
+  const [mobilePane, setMobilePane] = useState("transcript");
+  const [sourceOpen, setSourceOpen] = useState(false);
+  const [transcriptOnly, setTranscriptOnly] = useState(false);
+  const [guidanceSources, setGuidanceSources] = useState<string[] | null>(null);
   const actionRunning = useRef(false);
   const [busy, setBusy] = useState<BusyAction>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -190,22 +194,36 @@ export function Workspace({
     setExportOpen(true);
   }
   function handleSelectSource(fieldKey: string) {
+    setGuidanceSources(null);
     setSelectedFieldKey(fieldKey);
     setSourceFocusToken((token) => token + 1);
-    setMobilePane("source");
+    setSourceOpen(true);
   }
 
   const sourceField =
     workspace.draft?.fields.find((field) => field.key === selectedFieldKey) ??
     null;
-  const highlightIds = sourceField?.sources.map((source) => source.id) ?? [];
+  const highlightIds =
+    guidanceSources ??
+    (sourceOpen ? (sourceField?.sources.map((source) => source.id) ?? []) : []);
 
   return (
-    <div className="workspace">
+    <div
+      className="workspace consultation-workspace"
+      data-transcript-only={transcriptOnly}
+    >
       <header className="workspace-header">
         <div className="workspace-title-block">
           <div className="title-line">
             <h1>{workspace.patient_name}</h1>
+            {workspace.realtime && (
+              <RealtimeStatus
+                workspace={workspace}
+                disconnected={deviceDisconnected}
+                onUpdate={onWorkspaceUpdated}
+                onFreshness={setRealtimeFresh}
+              />
+            )}
             {workspace.patient_ref ? (
               <span className="patient-ref">{workspace.patient_ref}</span>
             ) : null}
@@ -217,6 +235,13 @@ export function Workspace({
           </p>
         </div>
         <div className="workspace-header-actions">
+          <button
+            className="btn btn-secondary btn-small transcript-focus-toggle"
+            aria-pressed={transcriptOnly}
+            onClick={() => setTranscriptOnly((v) => !v)}
+          >
+            {transcriptOnly ? "展开病历区" : "专注转写"}
+          </button>
           <span
             className={`status-chip tone-${statusTone(workspace.status)}`}
             data-status={workspace.status}
@@ -231,14 +256,7 @@ export function Workspace({
         音频和问诊文字将发送至已配置的模型服务，病历草稿须经医生核对确认。
       </p>
 
-      {workspace.realtime ? (
-        <RealtimeStatus
-          workspace={workspace}
-          disconnected={deviceDisconnected}
-          onUpdate={onWorkspaceUpdated}
-          onFreshness={setRealtimeFresh}
-        />
-      ) : (
+      {!workspace.realtime && (
         <StatusStepper
           status={workspace.status}
           hasAudio={workspace.audio !== null}
@@ -274,11 +292,10 @@ export function Workspace({
         </div>
       ) : null}
 
-      <div className="review-tabs" role="group" aria-label="审核分栏">
+      <div className="review-tabs" role="group" aria-label="工作台视图">
         {[
-          ["transcript", "原文"],
-          ["draft", "病历"],
-          ["source", "来源核对"],
+          ["transcript", "问诊与提醒"],
+          ["draft", "病历审核"],
         ].map(([key, title]) => (
           <button
             key={key}
@@ -310,6 +327,13 @@ export function Workspace({
             onTranscribe={handleTranscribe}
             onManualSave={handleManualTranscript}
             onDirtyChange={onDirtyChange}
+            guidanceFresh={realtimeFresh}
+            onGuidanceUpdate={onWorkspaceUpdated}
+            onGuidanceLocate={(ids) => {
+                    setGuidanceSources(ids);
+                    setSourceFocusToken((v) => v + 1);
+                    setMobilePane("transcript");
+                  }}
           />
         </div>
         <DraftPanel
@@ -329,12 +353,21 @@ export function Workspace({
           onCopy={handleCopy}
           onDirtyChange={onDirtyChange}
         />
-        <SourcePanel
-          workspace={workspace}
-          field={sourceField}
-          onSelectField={handleSelectSource}
-        />
       </div>
+      {sourceOpen && (
+        <Modal
+          className="source-drawer"
+          title="来源核对"
+          subtitle="核对字段原句，必要时回听对应音频。"
+          onClose={() => setSourceOpen(false)}
+        >
+          <SourcePanel
+            workspace={workspace}
+            field={sourceField}
+            onSelectField={handleSelectSource}
+          />
+        </Modal>
+      )}
       {exportOpen && (
         <RecordExport
           workspace={workspace}

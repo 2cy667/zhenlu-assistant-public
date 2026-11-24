@@ -25,6 +25,7 @@ export function RealtimeStatus({
   const [error, setError] = useState(""),
     [commandError, setCommandError] = useState(""),
     [busy, setBusy] = useState(false),
+    [detailsOpen, setDetailsOpen] = useState(false),
     [stopOpen, setStopOpen] = useState(false),
     [retry, setRetry] = useState(0);
   const running = useRef(false);
@@ -104,7 +105,30 @@ export function RealtimeStatus({
     ended: realtimeReady(workspace) ? "转写完成" : "正在收尾",
     disconnected: "采集设备断连",
   };
+  const failedChunks = r.chunks.some((chunk) => chunk.status === "failed");
+  const needsAttention = !!error || disconnected || r.capture === "disconnected" || failedChunks;
+  const compactLabel = error ? "连接异常" : disconnected ? "设备断连" : failedChunks ? "片段处理异常" : labels[r.capture];
   return (
+    <>
+      <button
+        type="button"
+        className={`realtime-status-chip${needsAttention ? " needs-attention" : ""}`}
+        aria-haspopup="dialog"
+        aria-expanded={detailsOpen || stopOpen}
+        aria-label={`${compactLabel}，查看接收状态与操作`}
+        title={`已接收 ${r.chunks.length} 段 · 已转写 ${r.chunks.filter(c => c.status === "completed").length} 段`}
+        onClick={() => setDetailsOpen(true)}
+      >
+        <span className="realtime-chip-dot" aria-hidden="true" />
+        <span role="status">{compactLabel}</span>
+        <span className="realtime-chip-chevron" aria-hidden="true">⌄</span>
+      </button>
+      {detailsOpen && <Modal
+        title="实时音频接收"
+        onClose={() => setDetailsOpen(false)}
+        closeDisabled={busy}
+        className="realtime-details-modal"
+      >
     <section className="realtime-status" aria-label="实时音频接收">
       <div className="row-between">
         <div>
@@ -129,7 +153,7 @@ export function RealtimeStatus({
               <button
                 className="btn btn-secondary btn-small"
                 disabled={busy || !!error}
-                onClick={() => setStopOpen(true)}
+                onClick={() => { setDetailsOpen(false); setStopOpen(true); }}
               >
                 结束接收
               </button>
@@ -194,6 +218,8 @@ export function RealtimeStatus({
           </div>
         ))}
       </details>
+    </section>
+    </Modal>}
       {stopOpen && (
         <Modal
           title="结束本次音频接收？"
@@ -221,8 +247,9 @@ export function RealtimeStatus({
           <p>
             后端将通知设备停止录音，接收最后一段音频并继续处理。设备确认停止前，页面保持等待状态。
           </p>
+          {commandError && <p className="field-error" role="alert">{commandError} 操作结果以最新接收状态为准。</p>}
         </Modal>
       )}
-    </section>
+    </>
   );
 }

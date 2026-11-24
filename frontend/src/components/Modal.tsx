@@ -8,6 +8,7 @@ interface ModalProps {
   footer?: ReactNode;
   onClose: () => void;
   closeDisabled?: boolean;
+  className?: string;
 }
 
 export function Modal({
@@ -17,6 +18,7 @@ export function Modal({
   footer,
   onClose,
   closeDisabled = false,
+  className = "",
 }: ModalProps) {
   const panel = useRef<HTMLElement>(null);
   const titleId = useId();
@@ -68,7 +70,7 @@ export function Modal({
 
   return createPortal(
     <div
-      className="modal-backdrop"
+      className={`modal-backdrop ${className}`}
       onMouseDown={(event) => {
         if (event.target === event.currentTarget && !closeDisabled) {
           onClose();

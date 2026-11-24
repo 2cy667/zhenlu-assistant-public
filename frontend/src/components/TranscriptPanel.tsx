@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import type { BusyAction, SessionDetail } from "../types";
+import type { BusyAction, GuidanceItem, SessionDetail } from "../types";
+import { guidanceAnchor, validGuidance } from "../guidance";
+import { ConsultationGuidance } from "./ConsultationGuidance";
 import { formatTimestamp } from "../utils";
 
 interface TranscriptPanelProps {
@@ -10,6 +12,9 @@ interface TranscriptPanelProps {
   onTranscribe: () => void;
   onManualSave: (text: string) => Promise<boolean>;
   onDirtyChange: (dirty: boolean) => void;
+  guidanceFresh: boolean;
+  onGuidanceUpdate: (next: SessionDetail) => void;
+  onGuidanceLocate: (ids: string[]) => void;
 }
 
 function EmptyWaveform() {
@@ -34,8 +39,28 @@ export function TranscriptPanel({
   onTranscribe,
   onManualSave,
   onDirtyChange,
+  guidanceFresh,
+  onGuidanceUpdate,
+  onGuidanceLocate,
 }: TranscriptPanelProps) {
   const transcript = workspace.transcript;
+  const rawGuidance = workspace.realtime?.guidance;
+  const guidance = validGuidance(rawGuidance) ? rawGuidance : null;
+  const sentenceHints = new Map<string, GuidanceItem[]>();
+  let unlinkedCount = 0;
+  for (const item of guidance?.items ?? []) {
+    const anchor = guidanceAnchor(item, transcript?.segments ?? []);
+    if (anchor) sentenceHints.set(anchor, [...(sentenceHints.get(anchor) ?? []), item]);
+    else if (item.status === "open" || item.status === "asked") unlinkedCount++;
+  }
+  const activeCount = (guidance?.items ?? []).filter(item => item.status === "open" || item.status === "asked").length;
+  const guidanceStatus = !rawGuidance ? "问诊提醒未启用"
+    : !guidance ? "问诊提醒暂不可用"
+    : !guidanceFresh ? "提醒同步中"
+    : guidance.status === "failed" ? "提醒更新失败，保留上次结果"
+    : guidance.status !== "ready" || guidance.transcript_revision !== workspace.realtime?.transcript_revision ? "正在分析新对话"
+    : unlinkedCount ? `${unlinkedCount} 条提醒等待关联原句`
+    : activeCount ? "提醒已标在对应原句下方" : "暂无待处理提醒";
   const [follow, setFollow] = useState(true);
   const [manualOpen, setManualOpen] = useState(false);
   const [manualText, setManualText] = useState("");
@@ -46,6 +71,7 @@ export function TranscriptPanel({
 
   useEffect(() => {
     if (focusToken === 0) return;
+    setFollow(false);
     const container = listRef.current;
     if (!container) return;
     const target = container.querySelector<HTMLElement>(
@@ -94,6 +120,10 @@ export function TranscriptPanel({
           <span className="revision-chip">{transcript.segments.length} 句</span>
         ) : null}
       </header>
+      {workspace.realtime && <div className="sentence-guidance-status" role="status">
+        <strong>{activeCount > 0 ? `${activeCount} 条问诊提醒` : "AI 问诊提醒"}</strong>
+        <span>{guidanceStatus}</span>
+      </div>}
 
       {!transcript && workspace.realtime ? (
         <div className="empty-panel">
@@ -199,9 +229,20 @@ export function TranscriptPanel({
             <p className="transcript-notice">{transcript.notice}</p>
           ) : null}
 
-          <div className="transcript-list" ref={listRef}>
+          <div
+            className="transcript-list"
+            ref={listRef}
+            onScroll={() => {
+              const el = listRef.current;
+              if (el && el.scrollHeight - el.scrollTop - el.clientHeight > 80)
+                setFollow(false);
+            }}
+          >
             {transcript.segments.map((segment) => {
               const highlighted = highlightSet.has(segment.id);
+              const hints = sentenceHints.get(segment.id) ?? [];
+              const activeHints = hints.filter(item => item.status === "open" || item.status === "asked");
+              const hintTone = activeHints.some(item => item.kind === "verify") ? "verify" : "follow_up";
               const speakerClass =
                 segment.speaker === "医生"
                   ? "doctor"
@@ -212,7 +253,7 @@ export function TranscriptPanel({
                 <article
                   key={segment.id}
                   id={`segment-${segment.id}`}
-                  className={`segment${highlighted ? " highlighted" : ""}`}
+                  className={`segment${highlighted ? " highlighted" : ""}${activeHints.length ? ` segment-has-hint segment-hint-${hintTone}` : ""}`}
                   data-highlighted={highlighted ? "true" : "false"}
                 >
                   <div className="segment-side">
@@ -226,12 +267,22 @@ export function TranscriptPanel({
                       </span>
                     ) : null}
                   </div>
+                  <div className="segment-content">
                   <p className="segment-text">
                     {segment.text}
                     {segment.is_final === false && (
                       <span className="badge badge-outline">识别中</span>
                     )}
                   </p>
+                  {hints.map(item => <ConsultationGuidance
+                    key={item.id}
+                    workspace={workspace}
+                    item={item}
+                    fresh={guidanceFresh}
+                    onUpdate={onGuidanceUpdate}
+                    onLocate={onGuidanceLocate}
+                  />)}
+                  </div>
                 </article>
               );
             })}
