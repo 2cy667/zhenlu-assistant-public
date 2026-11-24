@@ -31,6 +31,14 @@ class Base(DeclarativeBase):
     pass
 
 
+class CreationRequest(Base):
+    __tablename__ = "creation_requests"
+    kind: Mapped[str] = mapped_column(String(16), primary_key=True)
+    request_key: Mapped[str] = mapped_column(String(100), primary_key=True)
+    payload_hash: Mapped[str] = mapped_column(String(64))
+    resource_id: Mapped[str] = mapped_column(String(32))
+
+
 class Patient(Base):
     __tablename__ = "patients"
 

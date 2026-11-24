@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, status
 from sqlalchemy.orm import Session
 
 from app.database import get_db
+from app.routers.assistant import IdempotencyKey
 from app.schemas import SessionCreate, SessionDetailOut, SessionListOut
 from app.serializers import session_detail_dict, session_summary_dict
 from app.services.session_service import create_session, get_session_or_404, list_sessions
@@ -12,8 +13,8 @@ router = APIRouter(prefix="/sessions", tags=["会话"])
 
 
 @router.post("", response_model=SessionDetailOut, status_code=status.HTTP_201_CREATED)
-def create(payload: SessionCreate, db: Session = Depends(get_db)) -> dict:
-    session = create_session(db, payload)
+def create(payload: SessionCreate, idempotency_key: IdempotencyKey = None, db: Session = Depends(get_db)) -> dict:
+    session = create_session(db, payload, idempotency_key)
     return session_detail_dict(session)
 
 

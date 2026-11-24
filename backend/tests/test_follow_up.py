@@ -19,6 +19,16 @@ def visit(client, patient_id):
     return response.json()["id"]
 
 
+def test_intake_creation_retries_preserve_patient_and_session(client):
+    headers = {"Idempotency-Key": "intake-retry"}
+    for path, body in [("/api/patients", {"patient_name": "虚构患者"}), ("/api/sessions", {"patient_name": "虚构患者"})]:
+        with ThreadPoolExecutor(2) as pool:
+            responses = list(pool.map(lambda _: client.post(path, json=body, headers=headers), range(2)))
+        assert all(r.status_code == 201 for r in responses)
+        assert responses[0].json()["id"] == responses[1].json()["id"]
+        assert client.post(path, json={"patient_name": "另一位"}, headers=headers).status_code == 409
+
+
 def confirm(client, sid, text="患者：之前用过一种药，名字记不清。"):
     base = f"/api/sessions/{sid}"
     assert client.post(base + "/transcript/manual", json={"text": text}).status_code == 200

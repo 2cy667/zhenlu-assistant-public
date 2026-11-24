@@ -8,9 +8,13 @@ from app.errors import ApiError
 from app.models import ConsultationSession, Patient
 from app.schemas import SessionCreate
 from app.services.job_state import recover_expired
+from app.services.creation import reserve_creation
 
 
-def create_session(db: Session, payload: SessionCreate) -> ConsultationSession:
+def create_session(db: Session, payload: SessionCreate, request_key: str | None = None) -> ConsultationSession:
+    session_id, replay = reserve_creation(db, "session", request_key, payload)
+    if replay:
+        return get_session_or_404(db, session_id)
     patient = None
     if payload.patient_id:
         patient = db.get(Patient, payload.patient_id)
@@ -20,6 +24,7 @@ def create_session(db: Session, payload: SessionCreate) -> ConsultationSession:
                 or (payload.patient_ref and payload.patient_ref != patient.patient_ref)):
             raise ApiError(409, "patient_identity_conflict", "提交的身份信息与已选患者不一致。")
     session = ConsultationSession(
+        id=session_id,
         patient_id=payload.patient_id,
         patient_name=patient.patient_name if patient else payload.patient_name,
         patient_ref=patient.patient_ref if patient else payload.patient_ref,

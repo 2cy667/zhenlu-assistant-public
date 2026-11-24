@@ -1,16 +1,22 @@
-import { useEffect, useState } from "react";
+import { sourcePlayable } from "../realtime";
+import { useEffect, useRef, useState } from "react";
 import type { BusyAction, Draft, SessionDetail } from "../types";
 import { formatDateTime } from "../utils";
 import { Modal } from "./Modal";
 
 interface DraftPanelProps {
   workspace: SessionDetail;
+  deviceDisconnected: boolean;
   busy: BusyAction;
   selectedFieldKey: string | null;
   onSelectField: (fieldKey: string) => void;
   onGenerate: () => void;
   onSave: (
-    fields: Array<{ field_key: string; value: string; accept_suggestion?: boolean }>,
+    fields: Array<{
+      field_key: string;
+      value: string;
+      accept_suggestion?: boolean;
+    }>,
     expectedRevision: number,
   ) => Promise<boolean>;
   onRegenerate: (expectedRevision: number) => Promise<boolean>;
@@ -23,7 +29,11 @@ function DraftEmpty({
   workspace,
   busy,
   onGenerate,
-}: Pick<DraftPanelProps, "workspace" | "busy" | "onGenerate">) {
+  deviceDisconnected,
+}: Pick<
+  DraftPanelProps,
+  "workspace" | "busy" | "onGenerate" | "deviceDisconnected"
+>) {
   return (
     <section className="card draft-card">
       <header className="card-header">
@@ -44,7 +54,7 @@ function DraftEmpty({
               type="button"
               className="btn btn-primary"
               onClick={onGenerate}
-              disabled={busy !== null}
+              disabled={busy !== null || deviceDisconnected}
             >
               {busy === "generate" ? (
                 <>
@@ -73,6 +83,7 @@ interface DraftEditorProps extends DraftPanelProps {
 
 function DraftEditor({
   workspace,
+  deviceDisconnected,
   draft,
   busy,
   selectedFieldKey,
@@ -86,22 +97,51 @@ function DraftEditor({
   const [values, setValues] = useState<Record<string, string>>(() =>
     Object.fromEntries(draft.fields.map((field) => [field.key, field.value])),
   );
+  const [keptSuggestions, setKeptSuggestions] = useState<
+    Record<string, boolean>
+  >({});
+  const [reviewed, setReviewed] = useState<Record<string, boolean>>({});
+  const [identityChecked, setIdentityChecked] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [dialog, setDialog] = useState<"confirm" | "regenerate" | null>(null);
-  const [acceptedSuggestions, setAcceptedSuggestions] = useState<Record<string, boolean>>({});
+  const [acceptedSuggestions, setAcceptedSuggestions] = useState<
+    Record<string, boolean>
+  >({});
 
+  const previousDraft = useRef(draft);
+  const acceptedRef = useRef(acceptedSuggestions);
+  acceptedRef.current = acceptedSuggestions;
   useEffect(() => {
-    setValues(
-      Object.fromEntries(draft.fields.map((field) => [field.key, field.value])),
+    const previous = previousDraft.current;
+    const accepted = acceptedRef.current;
+    setValues((current) =>
+      Object.fromEntries(
+        draft.fields.map((field) => {
+          const old = previous.fields.find((f) => f.key === field.key);
+          const edited =
+            previous.id === draft.id &&
+            old &&
+            ((current[field.key] ?? "").trim() !== old.value ||
+              field.key in accepted);
+          return [field.key, edited ? current[field.key] : field.value];
+        }),
+      ),
     );
+    // A newer model result never overwrites in-flight typing. Reviews must be repeated.
     setFormError(null);
     setAcceptedSuggestions({});
+    setReviewed({});
+    setIdentityChecked(false);
+    setKeptSuggestions({});
+    previousDraft.current = draft;
   }, [draft.id, draft.revision]);
 
   const confirmed = draft.status === "confirmed";
   const anyBusy = busy !== null;
   const dirtyFields = draft.fields.filter(
-    (field) => (values[field.key] ?? "").trim() !== field.value,
+    (field) =>
+      (values[field.key] ?? "").trim() !== field.value ||
+      field.key in acceptedSuggestions,
   );
   const dirty = dirtyFields.length > 0;
   useEffect(() => {
@@ -112,7 +152,12 @@ function DraftEditor({
 
   function updateValue(fieldKey: string, value: string) {
     setValues((current) => ({ ...current, [fieldKey]: value }));
-    setAcceptedSuggestions((current) => ({ ...current, [fieldKey]: false }));
+    setAcceptedSuggestions((current) => {
+      const next = { ...current };
+      delete next[fieldKey];
+      return next;
+    });
+    setReviewed((current) => ({ ...current, [fieldKey]: false }));
     setFormError(null);
   }
 
@@ -122,6 +167,9 @@ function DraftEditor({
     );
     setFormError(null);
     setAcceptedSuggestions({});
+    setReviewed({});
+    setIdentityChecked(false);
+    setKeptSuggestions({});
   }
 
   async function handleSave() {
@@ -131,7 +179,7 @@ function DraftEditor({
       return;
     }
     setFormError(null);
-    await onSave(
+    const saved = await onSave(
       dirtyFields.map((field) => ({
         field_key: field.key,
         value: (values[field.key] ?? "").trim(),
@@ -139,16 +187,32 @@ function DraftEditor({
       })),
       draft.revision,
     );
+    if (saved) {
+      setAcceptedSuggestions({});
+      setValues((current) =>
+        Object.fromEntries(
+          Object.entries(current).map(([key, value]) => [
+            key,
+            value === values[key] ? value.trim() : value,
+          ]),
+        ),
+      );
+    }
   }
 
   async function handleConfirm() {
-    await onConfirm(draft.revision);
-    setDialog(null);
+    if (
+      deviceDisconnected ||
+      dirty ||
+      !identityChecked ||
+      !draft.fields.every((f) => reviewed[f.key])
+    )
+      return;
+    if (await onConfirm(draft.revision)) setDialog(null);
   }
 
   async function handleRegenerate() {
-    await onRegenerate(draft.revision);
-    setDialog(null);
+    if (await onRegenerate(draft.revision)) setDialog(null);
   }
 
   return (
@@ -157,13 +221,17 @@ function DraftEditor({
         <div>
           <div className="heading-row">
             <h2>病历草稿</h2>
-            <span className={`badge ${draft.is_mock ? "badge-history" : "badge-outline"}`}>
+            <span
+              className={`badge ${draft.is_mock ? "badge-history" : "badge-outline"}`}
+            >
               {draft.is_mock ? "含历史模拟内容" : "AI 草稿"}
             </span>
             {draft.has_doctor_edits ? (
               <span className="badge badge-doctor">含医生修改</span>
             ) : null}
-            {confirmed ? <span className="badge badge-confirmed">已确认</span> : null}
+            {confirmed ? (
+              <span className="badge badge-confirmed">已确认</span>
+            ) : null}
           </div>
         </div>
       </header>
@@ -180,16 +248,19 @@ function DraftEditor({
               {record.draft_revision}
             </p>
           </div>
-          <button type="button" className="btn btn-primary btn-small" onClick={onCopy}>
-            复制病历文本
+          <button
+            type="button"
+            className="btn btn-primary btn-small"
+            onClick={onCopy}
+          >
+            复制与导出
           </button>
         </div>
       ) : null}
 
       <div className="field-list">
         {draft.fields.map((field) => {
-          const fieldDirty =
-            (values[field.key] ?? "").trim() !== field.value;
+          const fieldDirty = (values[field.key] ?? "").trim() !== field.value;
           const selected = selectedFieldKey === field.key;
           return (
             <div
@@ -200,7 +271,10 @@ function DraftEditor({
             >
               <div className="field-head">
                 <div className="field-title-row">
-                  <label className="field-label" htmlFor={`draft-field-${field.key}`}>
+                  <label
+                    className="field-label"
+                    htmlFor={`draft-field-${field.key}`}
+                  >
                     {field.label}
                   </label>
                   {field.origin === "doctor" ? (
@@ -229,14 +303,32 @@ function DraftEditor({
                   id={`draft-field-${field.key}`}
                   className="field-textarea"
                   value={values[field.key] ?? ""}
-                  onChange={(event) => updateValue(field.key, event.target.value)}
+                  onChange={(event) =>
+                    updateValue(field.key, event.target.value)
+                  }
                   rows={2}
                   maxLength={4000}
                   disabled={anyBusy}
                 />
               )}
 
-              {field.suggestion && !confirmed ? (
+              {!confirmed && (
+                <label className="field-review">
+                  <input
+                    type="checkbox"
+                    checked={!!reviewed[field.key]}
+                    disabled={anyBusy || dirty}
+                    onChange={(event) =>
+                      setReviewed((current) => ({
+                        ...current,
+                        [field.key]: event.target.checked,
+                      }))
+                    }
+                  />
+                  已核对此字段{field.is_unmentioned ? "（未提及不等于无）" : ""}
+                </label>
+              )}
+              {field.suggestion && !confirmed && !keptSuggestions[field.key] ? (
                 <div className="suggestion-box">
                   <div className="suggestion-head">
                     <span className="badge badge-warning">系统新建议</span>
@@ -248,23 +340,78 @@ function DraftEditor({
                     className="btn btn-tiny"
                     onClick={() => {
                       updateValue(field.key, field.suggestion?.value ?? "");
-                      setAcceptedSuggestions((current) => ({ ...current, [field.key]: true }));
+                      setAcceptedSuggestions((current) => ({
+                        ...current,
+                        [field.key]: true,
+                      }));
                     }}
                     disabled={anyBusy}
                   >
                     填入建议值
                   </button>
+                  <button
+                    type="button"
+                    className="btn btn-tiny"
+                    disabled={anyBusy}
+                    onClick={() => {
+                      updateValue(field.key, field.value);
+                      setKeptSuggestions((current) => ({
+                        ...current,
+                        [field.key]: true,
+                      }));
+                    }}
+                  >
+                    保留医生内容
+                  </button>
+                  {field.key in acceptedSuggestions && (
+                    <p>已选择处理方式，请保存修改。</p>
+                  )}
                 </div>
               ) : null}
 
+              {keptSuggestions[field.key] && !confirmed && (
+                <p className="small-note">
+                  本次审核保留医生内容；确认将使用当前字段。
+                </p>
+              )}
+              {(workspace.audio || workspace.realtime) &&
+                workspace.transcript?.has_reliable_timestamps && (
+                  <div className="field-audio-sources">
+                    {field.sources
+                      .filter((source) => sourcePlayable(workspace, source))
+                      .map((source, index) => (
+                        <button
+                          type="button"
+                          className="text-btn"
+                          key={source.id}
+                          onClick={() => {
+                            onSelectField(field.key);
+                            window.dispatchEvent(
+                              new CustomEvent("zhenlu:play-source", {
+                                detail: { sessionId: workspace.id, source },
+                              }),
+                            );
+                          }}
+                        >
+                          回听来源 {index + 1}
+                        </button>
+                      ))}
+                  </div>
+                )}
               {(field.origin === "doctor" && field.edited_at) ||
-              (field.sources.length === 0 && !field.is_unmentioned && field.origin === "ai") ? (
+              (field.sources.length === 0 &&
+                !field.is_unmentioned &&
+                field.origin === "ai") ? (
                 <div className="field-foot">
                   {field.origin === "doctor" && field.edited_at ? (
                     <span>医生修改于 {formatDateTime(field.edited_at)}</span>
                   ) : null}
-                  {field.sources.length === 0 && !field.is_unmentioned && field.origin === "ai" ? (
-                    <span className="field-warning">无原文来源，请人工核对</span>
+                  {field.sources.length === 0 &&
+                  !field.is_unmentioned &&
+                  field.origin === "ai" ? (
+                    <span className="field-warning">
+                      无原文来源，请人工核对
+                    </span>
                   ) : null}
                 </div>
               ) : null}
@@ -302,7 +449,11 @@ function DraftEditor({
             ) : dirty ? (
               <p className="unsaved-hint">
                 有 {dirtyFields.length} 处未保存修改
-                <button type="button" className="text-btn" onClick={resetUnsaved}>
+                <button
+                  type="button"
+                  className="text-btn"
+                  onClick={resetUnsaved}
+                >
                   撤销
                 </button>
               </p>
@@ -314,7 +465,7 @@ function DraftEditor({
               type="button"
               className="btn btn-ghost"
               onClick={() => setDialog("regenerate")}
-              disabled={anyBusy || dirty}
+              disabled={anyBusy || dirty || deviceDisconnected}
               title={dirty ? "请先保存或撤销未保存修改" : undefined}
             >
               {busy === "regenerate" ? (
@@ -337,8 +488,11 @@ function DraftEditor({
             <button
               type="button"
               className="btn btn-confirm"
-              onClick={() => setDialog("confirm")}
-              disabled={anyBusy || dirty}
+              onClick={() => {
+                setIdentityChecked(false);
+                setDialog("confirm");
+              }}
+              disabled={anyBusy || dirty || deviceDisconnected}
               title={dirty ? "请先保存修改" : undefined}
             >
               {busy === "confirm" ? "确认中…" : "确认病历"}
@@ -359,7 +513,7 @@ function DraftEditor({
                 type="button"
                 className="btn btn-secondary"
                 onClick={() => setDialog(null)}
-                disabled={busy === "confirm"}
+                disabled={busy === "confirm" || deviceDisconnected}
               >
                 返回检查
               </button>
@@ -367,14 +521,33 @@ function DraftEditor({
                 type="button"
                 className="btn btn-confirm"
                 onClick={handleConfirm}
-                disabled={busy === "confirm"}
+                disabled={
+                  busy === "confirm" ||
+                  deviceDisconnected ||
+                  !identityChecked ||
+                  !draft.fields.every((f) => reviewed[f.key])
+                }
               >
-                {busy === "confirm" ? "正在确认…" : `确认并生成第 ${nextVersion} 版`}
+                {busy === "confirm"
+                  ? "正在确认…"
+                  : `确认并生成第 ${nextVersion} 版`}
               </button>
             </>
           }
         >
           <div className="confirm-summary">
+            <p>
+              已核对 {draft.fields.filter((f) => reviewed[f.key]).length} /{" "}
+              {draft.fields.length} 个字段。
+            </p>
+            <label className="field-review">
+              <input
+                type="checkbox"
+                checked={identityChecked}
+                onChange={(e) => setIdentityChecked(e.target.checked)}
+              />
+              我已核对患者身份、字段内容与原文来源
+            </label>
             <dl>
               <div>
                 <dt>患者</dt>
@@ -454,6 +627,7 @@ export function DraftPanel(props: DraftPanelProps) {
         workspace={workspace}
         busy={props.busy}
         onGenerate={props.onGenerate}
+        deviceDisconnected={props.deviceDisconnected}
       />
     );
   }

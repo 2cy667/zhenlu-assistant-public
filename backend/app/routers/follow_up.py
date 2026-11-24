@@ -10,6 +10,8 @@ from app.models import Patient
 from app.schemas import PatientCreate, PatientLink, SessionDetailOut
 from app.serializers import session_detail_dict
 from app.services import follow_up
+from app.routers.assistant import IdempotencyKey
+from app.services.creation import reserve_creation
 from app.services.advice_state import lock_session
 from app.services.session_service import get_session_or_404
 
@@ -17,8 +19,11 @@ router = APIRouter(tags=["患者与复诊"])
 
 
 @router.post("/patients", response_model=PatientOut, status_code=201)
-def add_patient(payload: PatientCreate, db: Session = Depends(get_db)):
-    patient = Patient(**payload.model_dump())
+def add_patient(payload: PatientCreate, idempotency_key: IdempotencyKey = None, db: Session = Depends(get_db)):
+    patient_id, replay = reserve_creation(db, "patient", idempotency_key, payload)
+    if replay:
+        return db.get(Patient, patient_id)
+    patient = Patient(id=patient_id, **payload.model_dump())
     db.add(patient)
     try:
         db.commit()

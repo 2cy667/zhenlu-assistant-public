@@ -1,5 +1,9 @@
 # 诊录助手接口说明（v0.4）
 
+医生页面的实时提醒与状态更新使用第 7、8 节接口。
+
+独立分段采集网关的可选协议见 [realtime-api.md](realtime-api.md)，默认前端使用本仓库的单文件上传或外部实时转录接口。
+
 - Base URL：`http://127.0.0.1:8000/api`
 - 数据格式：普通接口使用 UTF-8 JSON；音频上传使用 `multipart/form-data`，实时订阅使用 SSE。
 - 交互式文档：启动后端后访问 `http://127.0.0.1:8000/docs`。
@@ -604,6 +608,8 @@ Invoke-RestMethod "$baseUri/sessions/$sid/usage" | ConvertTo-Json -Depth 8
 **业务错误。** 422 validation_error 表示输入无效。404 patient_not_found 或 item_not_found 表示当前上下文无此对象。409 patient_ref_conflict、patient_identity_conflict、patient_already_linked、session_in_progress 分别提示核对重复编号、身份不匹配、已绑定或绑定时机。409 patient_link_required 表示跨次随访需要先关联档案。相同 request_id 提交不同内容返回 409 idempotency_conflict。版本过期返回 409 item_revision_conflict，重新读取事项及 actions 后再决定是否修改；已确认会话写操作返回 409 session_confirmed。
 
 ### 四组前端联调样例
+
+建档和新建会话可分别携带 `Idempotency-Key`。同一操作使用相同键和资料重试会返回原对象。相同键配不同资料返回 409。在本机单用户模式下，事项处理人显示“本机医生”。
 
 以下使用同一位虚构患者。请求中的 P、A、B、I 均替换为前一步实际返回的 ID。
 

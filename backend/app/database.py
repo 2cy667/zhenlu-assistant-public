@@ -62,7 +62,7 @@ class Database:
         if "consultation_sessions" not in tables or self.engine.dialect.name != "sqlite":
             return
         missing = not {"processing_jobs", "assistant_turns", "structured_dialogues", "schema_migrations", "transcript_batches", "advisor_states", "advisor_runs"}.issubset(tables)
-        missing |= not {"patients", "consultation_items", "consultation_item_actions"}.issubset(tables)
+        missing |= not {"patients", "consultation_items", "consultation_item_actions", "creation_requests"}.issubset(tables)
         missing |= "patient_id" not in {c["name"] for c in inspector.get_columns("consultation_sessions")}
         if "transcripts" in tables:
             missing |= not {"revision", "state"}.issubset({c["name"] for c in inspector.get_columns("transcripts")})
