@@ -357,6 +357,7 @@ def run_lines(lines, args, out_dir: Path) -> list[str]:
     chunk_count = 0
     recent: deque[tuple[int, bytes]] = deque()
     recent_samples = 0
+    captured = False
     pending_since: float | None = None      # 最后一句结束后开始计时
     grace = float(getattr(args, "idle_timeout", 5.0))
 
@@ -398,7 +399,7 @@ def run_lines(lines, args, out_dir: Path) -> list[str]:
             chunk_count += 1
             if chunk_count == 1:
                 print("  已开始接收音频，正在等待说话…（说完停一会儿自动收尾）", flush=True)
-            elif chunk_count % 20 == 0 and not assembler.active:
+            elif chunk_count % 20 == 0 and not assembler.active and not captured:
                 print(f"  已接收 {chunk_count / 10:.0f} s 音频，仍未检测到说话"
                       f"（说句话试试；一直没反应就查麦克风接线）", flush=True)
 
@@ -420,6 +421,7 @@ def run_lines(lines, args, out_dir: Path) -> list[str]:
                         recent_samples -= len(old) // SAMPLE_BYTES
 
         if event == "start":
+            captured = True
             print(f"  会话开始（采样 {assembler.base + assembler.pre_roll}，含 300 ms 前导）", flush=True)
             pending_since = None
             # 回填：把 SESSION_START 之前已经流过去的开头补进来
@@ -441,6 +443,7 @@ def run_lines(lines, args, out_dir: Path) -> list[str]:
             print(f"  最后一句后已静音 {grace:.0f} 秒，收尾。", flush=True)
             finalize()
             pending_since = None
+            print("  已收尾，可以继续说下一场；Ctrl+C 退出。", flush=True)
 
     finalize()
 
